@@ -15,7 +15,10 @@ import { assertInsideRoot, expandHome } from "./util/paths.js";
  * The real type is `import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"`.
  */
 export interface ExtensionAPILoose {
-  on(event: string, handler: (e: any) => any): void;
+  // pi event handlers may optionally return a result object that pi merges in
+  // (e.g., before_agent_start may return { systemPrompt }). Our loose typing
+  // accepts any return value; pi ignores ones it doesn't recognize.
+  on(event: string, handler: (e: any) => any | Promise<any>): void;
   registerCommand(
     name: string,
     options: {
@@ -113,6 +116,31 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   pi.on("agent_end", () => {
     // Also surface as turn_end — covers the case where agent_end fires without turn_end.
     for (const cb of turnEndCbs) cb();
+  });
+
+  // Inject system-prompt suffix so the agent knows about the Telegram bridge
+  // and our tool. Without this, the agent only sees the tool name/description
+  // in its tool list — it doesn't understand the `[telegram chat=...]` message
+  // convention or that mentioning a path in plain text won't deliver the file.
+  const TELEGRAM_PREFIX = "[telegram";
+  const SYSTEM_PROMPT_SUFFIX = `
+
+Telegram bridge extension is active.
+- Messages forwarded from Telegram are prefixed with "${TELEGRAM_PREFIX} chat=<id> from=<user_id>]" on their first line.
+- Telegram messages may include local temp file paths under ~/.pi/agent/tmp/telegram/ for attached photos, voice, audio, video, documents, and stickers. Read those files when they're relevant.
+- If a Telegram user asked for a file, image, voice, video, or you generated an artifact (chart, screenshot, audio, document, etc.), call the \`telegram_attach\` tool with the absolute local path. The bot will deliver each file with your reply (auto-classified by extension: photo / voice / video / audio / document).
+- DO NOT assume mentioning a local file path in plain text will send it to Telegram. Only \`telegram_attach\` actually delivers files.
+- For images you generated, save them under the current working directory or ~/.pi/agent/tmp/ before attaching — those are the allowed roots.
+- Static stickers (.webp) sent by users arrive as image content you can see directly. Video stickers (.webm) and Lottie stickers (.tgs) arrive as text-only emoji hints.
+- The current Telegram message context (chat, thread, originator) is implicit — your reply goes to whichever chat just messaged you. There is no per-chat session: all Telegram chats share this pi session. If you see messages from different chat ids, treat them as parallel conversations and stay focused on the most recent one.`;
+
+  pi.on("before_agent_start", (event: any) => {
+    const prompt = String(event?.prompt ?? "");
+    const isTelegram = prompt.trimStart().startsWith(TELEGRAM_PREFIX);
+    const suffix = isTelegram
+      ? `${SYSTEM_PROMPT_SUFFIX}\n- The current user message came from Telegram.`
+      : SYSTEM_PROMPT_SUFFIX;
+    return { systemPrompt: String(event?.systemPrompt ?? "") + suffix };
   });
 
   const bridge: PiBridge = {
