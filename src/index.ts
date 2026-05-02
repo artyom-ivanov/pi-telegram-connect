@@ -160,14 +160,7 @@ Telegram bridge extension is active.
 - Static stickers (.webp) sent by users arrive as image content you can see directly. Video stickers (.webm) and Lottie stickers (.tgs) arrive as text-only emoji hints.
 - The current Telegram message context (chat, thread, originator) is implicit — your reply goes to whichever chat just messaged you. There is no per-chat session: all Telegram chats share this pi session. If you see messages from different chat ids, treat them as parallel conversations and stay focused on the most recent one.`;
 
-  pi.on("before_agent_start", (event: any) => {
-    const prompt = String(event?.prompt ?? "");
-    const isTelegram = prompt.trimStart().startsWith(TELEGRAM_PREFIX);
-    const suffix = isTelegram
-      ? `${SYSTEM_PROMPT_SUFFIX}\n- The current user message came from Telegram.`
-      : SYSTEM_PROMPT_SUFFIX;
-    return { systemPrompt: String(event?.systemPrompt ?? "") + suffix };
-  });
+  // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
   const bridge: PiBridge = {
     sendUserMessage: (content) => pi.sendUserMessage(content),
@@ -207,6 +200,19 @@ Telegram bridge extension is active.
     onBotInit: (innerBot) => groupAccess.install(innerBot),
   });
 
+  // Inject Telegram bridge instructions ONLY when this turn was initiated by a
+  // Telegram message. For prompts typed directly into pi-CLI, the agent should
+  // not be told about telegram_attach — otherwise it calls the tool spuriously.
+  pi.on("before_agent_start", (event: any) => {
+    if (!bot.isInTurn()) return undefined;
+    const prompt = String(event?.prompt ?? "");
+    const isTelegram = prompt.trimStart().startsWith(TELEGRAM_PREFIX);
+    const suffix = isTelegram
+      ? `${SYSTEM_PROMPT_SUFFIX}\n- The current user message came from Telegram.`
+      : SYSTEM_PROMPT_SUFFIX;
+    return { systemPrompt: String(event?.systemPrompt ?? "") + suffix };
+  });
+
   const cmds = buildCliCommands({ configStore, bot });
   for (const c of cmds) {
     pi.registerCommand(c.name, { description: c.description, handler: c.handler });
@@ -243,7 +249,18 @@ Telegram bridge extension is active.
     }),
     async execute(_toolCallId: string, params: { paths: string[] }) {
       if (!bot.isInTurn()) {
-        throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
+        // Not in a Telegram-originated turn (e.g., user is typing directly in pi-CLI).
+        // Return a soft tool-result instead of throwing — the agent sees the message
+        // and adapts; the user doesn't see a scary error popup.
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "telegram_attach is only available while replying to a Telegram message. The current turn is not from Telegram, so no file was queued. Continue normally.",
+            },
+          ],
+          details: { added: [], errors: ["not in telegram turn"] },
+        };
       }
       const added: string[] = [];
       const errors: string[] = [];
