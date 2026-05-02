@@ -56,11 +56,6 @@ export class ConfigStore {
       await rename(this.path, backup).catch(() => undefined);
       return structuredClone(DEFAULT_CONFIG);
     }
-    if (typeof (parsed as Config).pendingPairCode === "object" && (parsed as Config).pendingPairCode !== null) {
-      if ((parsed as Config).pendingPairCode!.expiresAt < Date.now()) {
-        (parsed as Config).pendingPairCode = null;
-      }
-    }
     return parsed as Config;
   }
 
