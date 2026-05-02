@@ -35,17 +35,36 @@ export function buildCliCommands(deps: CliDeps): CliRegistration[] {
   return [
     {
       name: "telegram-connect",
-      description: "Start the Telegram bot. Optional --owner <user_id> skips pairing.",
+      description: "Start the Telegram bot. Without args, reuses stored token and owner.",
       handler: async (raw, ctx) => {
-        const args = splitArgs(raw);
-        const token = args[0];
-        if (!token) {
-          ctx.ui.notify("usage: /telegram-connect <token> [--owner <user_id>]");
+        if (bot.isRunning()) {
+          ctx.ui.notify("Bot is already running. Use /telegram-disconnect first.");
           return;
         }
+        const args = splitArgs(raw);
         const ownerIdx = args.indexOf("--owner");
         const explicitOwner = ownerIdx >= 0 ? Number(args[ownerIdx + 1]) : null;
+        // Token comes from arg if given, otherwise from stored config (post-restart reuse).
+        let token = args[0];
+        if (token === "--owner") token = undefined as unknown as string; // edge case: only --owner passed
+        const cfgBefore = await configStore.load();
+        if (!token) {
+          if (cfgBefore.botToken) {
+            token = cfgBefore.botToken;
+          } else {
+            ctx.ui.notify(
+              "No stored token. Usage: /telegram-connect <token> [--owner <user_id>]",
+            );
+            return;
+          }
+        }
         await bot.start(token);
+        // If we already have an owner from a prior pairing, skip pairing entirely.
+        const cfgAfterStart = await configStore.load();
+        if (cfgAfterStart.owner !== null && explicitOwner === null) {
+          ctx.ui.notify(`Bot reconnected. Owner: ${cfgAfterStart.owner} (existing).`);
+          return;
+        }
         const pairing = new PairingFlow(configStore);
         if (explicitOwner !== null && Number.isInteger(explicitOwner)) {
           await pairing.setExplicitOwner(explicitOwner);
