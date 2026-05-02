@@ -40,7 +40,7 @@ export async function downloadToPath(args: DownloadArgs): Promise<void> {
   const reader = (res.body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
+  for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     if (!value) continue;

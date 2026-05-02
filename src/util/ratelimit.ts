@@ -16,7 +16,7 @@ export class TokenBucket {
 
   /** Wait until a token is available, then consume it. */
   async consume(): Promise<void> {
-    while (true) {
+    for (;;) {
       this.refill();
       if (this.tokens >= 1) {
         this.tokens -= 1;
