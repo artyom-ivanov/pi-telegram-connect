@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { ConfigStore } from "./config/ConfigStore.js";
-import { TelegramBot, type PiBridge } from "./bot/TelegramBot.js";
+import { TelegramBot, type PiBridge, type UserMessageContent } from "./bot/TelegramBot.js";
 import { StickerCache } from "./bot/StickerCache.js";
 import { GroupAccess } from "./bot/GroupAccess.js";
 import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
@@ -20,7 +20,14 @@ export interface ExtensionAPILoose {
       handler: (args: string, ctx: CommandCtx) => Promise<void>;
     },
   ): void;
-  sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
+  /**
+   * Real signature: `content: string | (TextContent | ImageContent)[]`. We keep it loose
+   * here to avoid a hard pi-ai type import; UserMessageContent matches structurally.
+   */
+  sendUserMessage(
+    content: string | UserMessageContent[],
+    options?: { deliverAs?: "steer" | "followUp" },
+  ): void;
 }
 
 export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string; version: string } {
@@ -90,7 +97,7 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   });
 
   const bridge: PiBridge = {
-    sendUserMessage: (text) => pi.sendUserMessage(text),
+    sendUserMessage: (content) => pi.sendUserMessage(content),
     onMessageDelta: (cb) => {
       deltaCbs.add(cb);
       return () => deltaCbs.delete(cb);

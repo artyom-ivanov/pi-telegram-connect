@@ -14,12 +14,18 @@ import { expandHome } from "../util/paths.js";
 
 type RunState = "starting" | "running" | "draining" | "stopped";
 
+/** Multimedia message content shape compatible with pi.sendUserMessage. */
+export type UserMessageContent =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string };
+
 /**
  * Pi-side hooks the bot needs from the extension entry. The entry wires these,
  * delegating to pi.sendUserMessage / pi.on via captured `pi: ExtensionAPI`.
  */
 export interface PiBridge {
-  sendUserMessage: (text: string) => void;
+  /** Pi accepts either a plain string or an array of TextContent | ImageContent. */
+  sendUserMessage: (content: string | UserMessageContent[]) => void;
   /** Subscribe to message-text deltas. The returned function unsubscribes. */
   onMessageDelta: (cb: (text: string) => void) => () => void;
   onToolStart: (cb: (toolName: string, argsSummary: string) => void) => () => void;
@@ -275,17 +281,34 @@ export class TelegramBot {
       const sk = m.sticker;
       const kind: "static" | "video" | "lottie" =
         sk.is_animated ? "lottie" : sk.is_video ? "video" : "static";
-      const dest =
-        kind === "lottie"
-          ? null
-          : await downloadFile(sk.file_id, sk.file_unique_id, kind === "video" ? "sticker.webm" : "sticker.webp");
-      const text = await this.opts.stickerCache.describe({
-        fileUniqueId: sk.file_unique_id,
-        emoji: sk.emoji ?? "🎴",
-        kind,
-        ...(dest !== null ? { filePath: dest } : {}),
-      });
-      attached.push(text);
+      if (kind === "static") {
+        // Static stickers are .webp images. Send to the agent as image content
+        // so its vision capability sees the sticker directly. Also keep an emoji
+        // hint in text for context.
+        const dest = await downloadFile(sk.file_id, sk.file_unique_id, "sticker.webp");
+        let injected = false;
+        if (dest) {
+          try {
+            const { readFile } = await import("node:fs/promises");
+            const buf = await readFile(dest);
+            images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/webp" });
+            attached.push(`[user sent a static sticker (emoji hint: ${sk.emoji ?? "🎴"})]`);
+            injected = true;
+          } catch {
+            // fall through to text-only
+          }
+        }
+        if (!injected) {
+          attached.push(`[user sent sticker (emoji: ${sk.emoji ?? "🎴"})]`);
+        }
+      } else if (kind === "video") {
+        // Video stickers: don't ship the .webm to the agent (most LLMs don't accept video).
+        // We could ffmpeg-extract a frame, but that's StickerCache's job; for V1, emoji-only.
+        attached.push(`[user sent a video sticker (emoji: ${sk.emoji ?? "🎴"})]`);
+      } else {
+        // Lottie animated sticker — emoji-only.
+        attached.push(`[user sent an animated sticker (emoji: ${sk.emoji ?? "🎴"})]`);
+      }
     }
 
     if (attached.length > 0) {
@@ -350,14 +373,18 @@ export class TelegramBot {
     }
 
     try {
-      // Push the message into the pi session. We send text only — image inlining
-      // through pi.sendUserMessage requires the multimedia content array form,
-      // which we keep simple in V1: include image-source mention as a path in text.
-      let sendText = item.promptText;
+      // Push the message into the pi session. If we have images (photos, static stickers),
+      // use the multimedia array form: pi.sendUserMessage accepts (TextContent | ImageContent)[].
+      // Otherwise plain text is fine.
       if (item.images.length > 0) {
-        sendText += `\n\n[telegram inline images: ${item.images.length} (base64 omitted; sent separately)]`;
+        const content: UserMessageContent[] = [
+          { type: "text", text: item.promptText },
+          ...item.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType })),
+        ];
+        this.opts.pi.sendUserMessage(content);
+      } else {
+        this.opts.pi.sendUserMessage(item.promptText);
       }
-      this.opts.pi.sendUserMessage(sendText);
       // Wait for turn_end. If pi never fires it (shouldn't happen), bound the wait.
       const timeout = new Promise<void>((res) => setTimeout(res, 10 * 60_000));
       await Promise.race([turnEnded, timeout]);
