@@ -1,4 +1,4 @@
-import { Bot, type Context } from "grammy";
+import { Bot, type Context, InputFile } from "grammy";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import type { ConfigStore } from "../config/ConfigStore.js";
 import { evaluateAccess } from "./AccessControl.js";
@@ -483,16 +483,21 @@ export class TelegramBot {
         const isVideo = /\.(mp4|mov|m4v)$/i.test(lower);
         const isVoice = /\.ogg$/i.test(lower);
         const isAudio = /\.(mp3|m4a|flac|wav)$/i.test(lower);
+        // grammy expects an `InputFile` (or string URL/file_id), NOT a {source}
+        // object — that's the node-telegram-bot-api convention. Without InputFile
+        // the path is stringified as `[object Object]` and Telegram bounces with
+        // "invalid file HTTP URL".
+        const file = new InputFile(absPath);
         if (isImage) {
-          await api.sendPhoto(chatId, { source: absPath }, { ...threadOpt });
+          await api.sendPhoto(chatId, file, { ...threadOpt });
         } else if (isVideo) {
-          await api.sendVideo(chatId, { source: absPath }, { ...threadOpt });
+          await api.sendVideo(chatId, file, { ...threadOpt });
         } else if (isVoice) {
-          await api.sendVoice(chatId, { source: absPath }, { ...threadOpt });
+          await api.sendVoice(chatId, file, { ...threadOpt });
         } else if (isAudio) {
-          await api.sendAudio(chatId, { source: absPath }, { ...threadOpt });
+          await api.sendAudio(chatId, file, { ...threadOpt });
         } else {
-          await api.sendDocument(chatId, { source: absPath }, { ...threadOpt });
+          await api.sendDocument(chatId, file, { ...threadOpt });
         }
       } catch (err) {
         this.opts.cliLog(`failed to send attachment ${absPath}: ${(err as Error)?.message ?? err}`);
