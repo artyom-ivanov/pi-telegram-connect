@@ -107,13 +107,15 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     const name = String(e?.toolName ?? "tool");
     for (const cb of toolEndCbs) cb(name);
   });
-  pi.on("turn_end", () => {
-    for (const cb of turnEndCbs) cb();
-  });
+  // Note: do NOT fire turnEndCbs on `turn_end`. In pi's model, one user message
+  // produces one agent_start..agent_end span containing MULTIPLE turn_start..turn_end
+  // pairs (one per assistant message + tool calls round). Treating the first turn_end
+  // as end-of-everything was a bug — the agent's later tool calls (e.g., telegram_attach
+  // after a bash tool) would arrive after we'd already torn down activeTurn.
+  // agent_end is the canonical end-of-processing signal.
   pi.on("agent_end", (e: any) => {
     // Inspect the last assistant message; if it ended with stopReason "error",
     // surface it so the active streamer can display _⚠️ error: <msg>_.
-    // Pi pattern matches pi-telegram: messages: AgentMessage[].
     const messages = Array.isArray(e?.messages) ? e.messages : [];
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];

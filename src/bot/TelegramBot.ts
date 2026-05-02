@@ -29,7 +29,13 @@ export interface PiBridge {
   onMessageDelta: (cb: (text: string) => void) => () => void;
   onToolStart: (cb: (toolName: string, argsSummary: string) => void) => () => void;
   onToolEnd: (cb: (toolName: string) => void) => () => void;
-  /** End-of-turn signal (we treat agent_end and turn_end the same). */
+  /**
+   * Fires when pi finishes processing one user message (i.e., the whole
+   * agent_start..agent_end span). NOT per turn_end inside that span — pi
+   * may run multiple turns (assistant text + tool calls + tool results) for
+   * a single user message, and we need the agent's later tool calls to
+   * still see activeTurn set.
+   */
   onTurnEnd: (cb: () => void) => () => void;
   /** Subscribe to agent_start; the callback receives an `abort` thunk that cancels the running pi agent. */
   onAgentStart: (cb: (abort: () => void) => void) => () => void;
