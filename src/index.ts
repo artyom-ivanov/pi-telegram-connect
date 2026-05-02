@@ -1,100 +1,128 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { ConfigStore } from "./config/ConfigStore.js";
-import { TelegramBot } from "./bot/TelegramBot.js";
+import { TelegramBot, type PiBridge } from "./bot/TelegramBot.js";
 import { StickerCache } from "./bot/StickerCache.js";
 import { GroupAccess } from "./bot/GroupAccess.js";
-import { PiAgentHost, type PiSdkBindings } from "./agent/PiAgentHost.js";
-import { buildVisionFn, type VisionSdkBindings } from "./agent/VisionBinding.js";
-import { buildCliCommands, type CliRegistration } from "./commands/cli.js";
+import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
 
 /**
- * Pi extension factory.
- *
- * The pi-CLI passes us an ExtensionContext with already-initialized AuthStorage,
- * ModelRegistry, plus helpers for SessionManager. We treat ExtensionContext loosely
- * (its exact shape lives in pi-coding-agent's extension/types.ts). Any shape mismatches
- * will show up at integration time — this is the only place in the codebase that touches
- * pi-CLI internals directly.
+ * Loose subset of @mariozechner/pi-coding-agent's ExtensionAPI that we use.
+ * This avoids a hard import dependency at type-check time on the extension's exact shape.
+ * The real type is `import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"`.
  */
-export interface ExtensionContextLoose {
-  authStorage: unknown;
-  modelRegistry: unknown;
-  sessionManagerForPath: (absPath: string) => unknown;
-  createAgentSession: PiSdkBindings["createAgentSession"];
-  pickVisionModel: VisionSdkBindings["pickVisionModel"];
-  completeSimple: VisionSdkBindings["completeSimple"];
-  registerCommand: (cmd: CliRegistration) => void;
-  log: (msg: string) => void;
+export interface ExtensionAPILoose {
+  on(event: string, handler: (e: any) => any): void;
+  registerCommand(
+    name: string,
+    options: {
+      description?: string;
+      handler: (args: string, ctx: CommandCtx) => Promise<void>;
+    },
+  ): void;
+  sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
 }
 
-export default function piTelegramConnect(
-  ctx: ExtensionContextLoose,
-): { name: string; version: string } {
+export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string; version: string } {
   const home = homedir();
   const configPath = join(home, ".pi", "agent", "telegram-connect.json");
   const stickerPath = join(home, ".pi", "agent", "telegram-connect-stickers.json");
-  const sessionsDir = join(home, ".pi", "agent", "telegram-sessions");
   const tmpDir = join(home, ".pi", "agent", "tmp", "telegram");
 
   const configStore = new ConfigStore(configPath);
 
-  const visionFn = buildVisionFn({
-    pickVisionModel: ctx.pickVisionModel,
-    completeSimple: ctx.completeSimple,
-  });
-
+  // Vision is disabled in V1 (extension API doesn't expose ModelRegistry/auth in a clean way).
+  // Sticker descriptions degrade to emoji-only.
   const stickerCache = new StickerCache({
     cachePath: stickerPath,
     maxEntries: 5000,
     ttlMs: 90 * 24 * 60 * 60 * 1000,
-    maxVisionCallsPerDay: 100,
-    visionFn,
+    maxVisionCallsPerDay: 0,
+    visionFn: async () => null,
   });
 
-  const cliLog = (msg: string) => ctx.log(`[telegram-connect] ${msg}`);
-
-  const bindings: PiSdkBindings = {
-    authStorage: ctx.authStorage,
-    modelRegistry: ctx.modelRegistry,
-    createAgentSession: ctx.createAgentSession,
-    sessionManagerForPath: ctx.sessionManagerForPath,
+  const cliLog = (msg: string) => {
+    // pi-CLI loggers vary; the safest place is process.stderr so it shows in pi's debug output.
+    process.stderr.write(`[telegram-connect] ${msg}\n`);
   };
 
-  const agentHost = new PiAgentHost({
-    bindings,
-    configStore,
-    sessionsDir,
-    maxLiveSessions: 256,
-    sessionIdleHours: 24,
+  // Build the pi-bridge that TelegramBot consumes. Every callback registration
+  // returns an unsubscribe function. pi.on doesn't return one, so we keep sets
+  // of "active" callbacks; on stop we just empty the sets.
+  type Cb<T extends any[]> = (...a: T) => void;
+  const deltaCbs = new Set<Cb<[string]>>();
+  const toolStartCbs = new Set<Cb<[string, string]>>();
+  const toolEndCbs = new Set<Cb<[string]>>();
+  const turnEndCbs = new Set<Cb<[]>>();
+
+  pi.on("message_update", (e: any) => {
+    const text = e?.delta?.text;
+    if (typeof text === "string" && text.length > 0) {
+      for (const cb of deltaCbs) cb(text);
+    }
   });
+  pi.on("tool_execution_start", (e: any) => {
+    const name = String(e?.toolName ?? e?.tool ?? "tool");
+    const args = String(e?.argsSummary ?? "");
+    for (const cb of toolStartCbs) cb(name, args);
+  });
+  pi.on("tool_execution_end", (e: any) => {
+    const name = String(e?.toolName ?? "tool");
+    for (const cb of toolEndCbs) cb(name);
+  });
+  pi.on("turn_end", () => {
+    for (const cb of turnEndCbs) cb();
+  });
+  pi.on("agent_end", () => {
+    // Also surface as turn_end — covers the case where agent_end fires without turn_end.
+    for (const cb of turnEndCbs) cb();
+  });
+
+  const bridge: PiBridge = {
+    sendUserMessage: (text) => pi.sendUserMessage(text),
+    onMessageDelta: (cb) => {
+      deltaCbs.add(cb);
+      return () => deltaCbs.delete(cb);
+    },
+    onToolStart: (cb) => {
+      toolStartCbs.add(cb);
+      return () => toolStartCbs.delete(cb);
+    },
+    onToolEnd: (cb) => {
+      toolEndCbs.add(cb);
+      return () => toolEndCbs.delete(cb);
+    },
+    onTurnEnd: (cb) => {
+      turnEndCbs.add(cb);
+      return () => turnEndCbs.delete(cb);
+    },
+  };
+
+  const groupAccess = new GroupAccess({ configStore, cliLog });
 
   const bot = new TelegramBot({
     configStore,
-    agentHost,
     stickerCache,
     tmpDir,
-    outboundAllowedRoots: [tmpDir, join(home, ".pi", "agent", "tmp")],
     cliLog,
+    pi: bridge,
+    onBotInit: (innerBot) => groupAccess.install(innerBot),
   });
 
-  const groupAccess = new GroupAccess({ configStore, cliLog });
-  bot.onBotInit = (innerBot) => groupAccess.install(innerBot);
-
-  const cmds = buildCliCommands({ configStore, bot, cliLog });
-  for (const c of cmds) ctx.registerCommand(c);
+  const cmds = buildCliCommands({ configStore, bot });
+  for (const c of cmds) {
+    pi.registerCommand(c.name, { description: c.description, handler: c.handler });
+  }
 
   cliLog("Extension loaded. Use /telegram-connect <token> to start.");
 
   return { name: "pi-telegram-connect", version: "0.1.0" };
 }
 
+// Public re-exports (if anyone imports the package as a library)
 export { ConfigStore } from "./config/ConfigStore.js";
 export { TelegramBot } from "./bot/TelegramBot.js";
-export { PiAgentHost } from "./agent/PiAgentHost.js";
 export { StickerCache } from "./bot/StickerCache.js";
 export type { Config } from "./config/schema.js";
-export type { CliRegistration } from "./commands/cli.js";
-export type { PiSdkBindings, PiSdkSession } from "./agent/PiAgentHost.js";
-export type { VisionSdkBindings } from "./agent/VisionBinding.js";
-export type { AgentHost, AgentSessionRef, ToolDefinitionLike } from "./agent/AgentHost.js";
+export type { CliRegistration, CommandCtx } from "./commands/cli.js";
+export type { PiBridge } from "./bot/TelegramBot.js";

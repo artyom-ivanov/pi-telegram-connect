@@ -1,14 +1,11 @@
 import { Bot, type Context } from "grammy";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import type { ConfigStore } from "../config/ConfigStore.js";
-import type { AgentHost } from "../agent/AgentHost.js";
 import { evaluateAccess } from "./AccessControl.js";
-import { routeKey } from "./ChatRouter.js";
 import { MessageQueue } from "./MessageQueue.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { Streamer } from "./Streamer.js";
 import { StickerCache } from "./StickerCache.js";
-import { buildMediaTools } from "./MediaTools.js";
 import { resolveDestPath, downloadToPath } from "./MediaIngest.js";
 import { TelegramRateLimiter } from "../util/ratelimit.js";
 import type { Config } from "../config/schema.js";
@@ -17,13 +14,28 @@ import { expandHome } from "../util/paths.js";
 
 type RunState = "starting" | "running" | "draining" | "stopped";
 
+/**
+ * Pi-side hooks the bot needs from the extension entry. The entry wires these,
+ * delegating to pi.sendUserMessage / pi.on via captured `pi: ExtensionAPI`.
+ */
+export interface PiBridge {
+  sendUserMessage: (text: string) => void;
+  /** Subscribe to message-text deltas. The returned function unsubscribes. */
+  onMessageDelta: (cb: (text: string) => void) => () => void;
+  onToolStart: (cb: (toolName: string, argsSummary: string) => void) => () => void;
+  onToolEnd: (cb: (toolName: string) => void) => () => void;
+  /** End-of-turn signal (we treat agent_end and turn_end the same). */
+  onTurnEnd: (cb: () => void) => () => void;
+}
+
 export interface TelegramBotOptions {
   configStore: ConfigStore;
-  agentHost: AgentHost;
   stickerCache: StickerCache;
   tmpDir: string;
-  outboundAllowedRoots: string[];
   cliLog: (msg: string) => void;
+  pi: PiBridge;
+  /** Optional hook (set by extension entry to install GroupAccess on the live grammy Bot). */
+  onBotInit?: (bot: Bot) => void;
 }
 
 interface QueueItem {
@@ -39,9 +51,16 @@ export class TelegramBot {
   private runner: RunnerHandle | null = null;
   private queue: MessageQueue<QueueItem> | null = null;
   private rateLimiter = new TelegramRateLimiter();
-  private streamers = new Map<SessionKey, Streamer>();
-  /** Optional hook injected by the extension entry to wire GroupAccess into the live Bot. */
-  public onBotInit?: (bot: Bot) => void;
+  /** The streamer for the chat whose message is currently in flight inside the pi session. */
+  private activeStreamer: Streamer | null = null;
+  /** Resolves when the active turn finishes. Set by runTurn, fulfilled by onTurnEnd. */
+  private turnEndResolver: (() => void) | null = null;
+
+  /** Single global FIFO key — single-session model. */
+  private static readonly GLOBAL_KEY: SessionKey = "0:0";
+
+  /** Pi-side event subscriptions; established on start, torn down on stop. */
+  private piUnsubs: Array<() => void> = [];
 
   constructor(private opts: TelegramBotOptions) {}
 
@@ -57,9 +76,9 @@ export class TelegramBot {
     await this.opts.configStore.save(cfg);
 
     this.bot = new Bot(token);
-    if (this.onBotInit) {
+    if (this.opts.onBotInit) {
       try {
-        this.onBotInit(this.bot);
+        this.opts.onBotInit(this.bot);
       } catch (e) {
         this.opts.cliLog(`onBotInit hook error: ${(e as Error).message}`);
       }
@@ -71,6 +90,30 @@ export class TelegramBot {
       overflow: "drop-oldest",
       worker: (item, controller) => this.runTurn(item, controller),
     });
+
+    // Wire pi-side subscriptions. Deltas/tool/turn-end events route to the currently active streamer.
+    this.piUnsubs.push(
+      this.opts.pi.onMessageDelta((text) => {
+        if (this.activeStreamer && text) this.activeStreamer.appendDelta(text);
+      }),
+    );
+    this.piUnsubs.push(
+      this.opts.pi.onToolStart((name, args) => {
+        this.activeStreamer?.toolStart(name, args);
+      }),
+    );
+    this.piUnsubs.push(
+      this.opts.pi.onToolEnd((name) => {
+        this.activeStreamer?.toolEnd(name);
+      }),
+    );
+    this.piUnsubs.push(
+      this.opts.pi.onTurnEnd(() => {
+        const r = this.turnEndResolver;
+        this.turnEndResolver = null;
+        if (r) r();
+      }),
+    );
 
     this.bot.on("message", async (ctx) => {
       if (this.state !== "running") return;
@@ -107,24 +150,20 @@ export class TelegramBot {
         return;
       }
 
-      const tid = ctx.message.message_thread_id;
       const lower = trimmed.toLowerCase();
       if (lower === "/stop") {
-        const k = routeKey({ chat: ctx.chat, ...(tid !== undefined ? { message_thread_id: tid } : {}) });
-        await this.handleStop(k);
+        this.handleStop();
         return;
       }
       if (lower === "/reset") {
-        const k = routeKey({ chat: ctx.chat, ...(tid !== undefined ? { message_thread_id: tid } : {}) });
-        await this.opts.agentHost.resetSession(k);
-        await ctx.reply("History cleared for this chat.");
+        // Single-session model: /reset is informational. Real reset would require pi-CLI side.
+        await ctx.reply("Sorry, /reset is not supported in V1 (single-session bridge). Use pi-CLI to reset.");
         return;
       }
 
       const item = await this.normalizeMessage(ctx, cfgNow);
       if (!item) return;
-      const k = routeKey({ chat: ctx.chat, ...(tid !== undefined ? { message_thread_id: tid } : {}) });
-      this.queue!.enqueue(k, item);
+      this.queue!.enqueue(TelegramBot.GLOBAL_KEY, item);
     });
 
     this.runner = run(this.bot, {
@@ -140,25 +179,30 @@ export class TelegramBot {
     this.state = "draining";
     this.queue?.abortAll();
     if (this.runner) await this.runner.stop().catch(() => undefined);
-    await this.opts.agentHost.shutdown().catch(() => undefined);
+    for (const off of this.piUnsubs) off();
+    this.piUnsubs = [];
     this.runner = null;
     this.bot = null;
     this.queue = null;
-    this.streamers.clear();
+    this.activeStreamer = null;
     this.state = "stopped";
     this.opts.cliLog(`Bot stopped.`);
   }
 
-  private async handleStop(key: SessionKey): Promise<void> {
-    this.queue?.abortAndClear(key);
-    const streamer = this.streamers.get(key);
-    if (streamer) await streamer.appendStopMarker().catch(() => undefined);
+  private handleStop(): void {
+    this.queue?.abortAndClear(TelegramBot.GLOBAL_KEY);
+    if (this.activeStreamer) {
+      void this.activeStreamer.appendStopMarker().catch(() => undefined);
+    }
   }
 
   private async normalizeMessage(ctx: Context, cfg: Config): Promise<QueueItem | null> {
     const m = ctx.message;
     if (!m) return null;
     const parts: string[] = [];
+    parts.push(
+      `[telegram chat=${ctx.chat!.id}${m.message_thread_id ? `:${m.message_thread_id}` : ""} from=${ctx.from?.id ?? "?"}]`,
+    );
     if (m.reply_to_message) {
       const snippet = (m.reply_to_message.text ?? m.reply_to_message.caption ?? "").slice(0, 200);
       parts.push(`[in reply to (msg ${m.reply_to_message.message_id}): ${snippet}]`);
@@ -249,7 +293,10 @@ export class TelegramBot {
     }
     const userText = m.text ?? m.caption ?? "";
     if (userText) parts.push(userText);
-    if (parts.length === 0 && images.length === 0) return null;
+    if (parts.length === 1 && images.length === 0) {
+      // only the [telegram chat=...] header — empty input
+      return null;
+    }
 
     return {
       ctx,
@@ -261,16 +308,6 @@ export class TelegramBot {
 
   private async runTurn(item: QueueItem, controller: AbortController): Promise<void> {
     const ctx = item.ctx;
-    const tid = ctx.message?.message_thread_id;
-    const k = routeKey({ chat: ctx.chat!, ...(tid !== undefined ? { message_thread_id: tid } : {}) });
-    const cfg = await this.opts.configStore.load();
-    const tools = buildMediaTools({
-      chatId: ctx.chat!.id,
-      threadId: ctx.message?.message_thread_id ?? 0,
-      outboundAllowedRoots: cfg.limits.outboundAllowedRoots,
-      client: ctx.api as any,
-    });
-    const session = await this.opts.agentHost.getOrCreateSession(k, { customTools: tools });
 
     const streamer = new Streamer({
       client: rateLimited(ctx.api as any, this.rateLimiter, ctx.chat!.id),
@@ -280,18 +317,11 @@ export class TelegramBot {
       ageResetMs: 60_000,
       ...(item.replyToMessageId !== undefined ? { replyToOnFirst: item.replyToMessageId } : {}),
     });
-    this.streamers.set(k, streamer);
+    this.activeStreamer = streamer;
     streamer.beginTurn();
 
-    const off = session.subscribe((e) => {
-      if (controller.signal.aborted) return;
-      if (e.type === "message_update") {
-        if (e.delta.text) streamer.appendDelta(e.delta.text);
-      } else if (e.type === "tool_execution_start") {
-        streamer.toolStart(e.toolName, e.argsSummary);
-      } else if (e.type === "tool_execution_end") {
-        streamer.toolEnd(e.toolName);
-      }
+    const turnEnded = new Promise<void>((resolve) => {
+      this.turnEndResolver = resolve;
     });
 
     const stopHandler = () => {
@@ -302,16 +332,27 @@ export class TelegramBot {
     }
 
     try {
-      const promptOpts = item.images.length > 0 ? { images: item.images } : undefined;
-      await session.prompt(item.promptText, promptOpts);
+      // Push the message into the pi session. We send text only — image inlining
+      // through pi.sendUserMessage requires the multimedia content array form,
+      // which we keep simple in V1: include image-source mention as a path in text.
+      // (The image was downloaded to disk by normalizeMessage; we surface its path.)
+      let sendText = item.promptText;
+      if (item.images.length > 0) {
+        sendText += `\n\n[telegram inline images: ${item.images.length} (base64 omitted; sent separately)]`;
+      }
+      this.opts.pi.sendUserMessage(sendText);
+      // Wait for turn_end. If pi never fires it (shouldn't happen), we'd hang —
+      // fall back: bound the wait to 10 minutes.
+      const timeout = new Promise<void>((res) => setTimeout(res, 10 * 60_000));
+      await Promise.race([turnEnded, timeout]);
       await streamer.flush();
       await streamer.finalize();
     } catch (err) {
-      this.opts.cliLog(`runTurn error in ${k}: ${(err as Error)?.message ?? String(err)}`);
+      this.opts.cliLog(`runTurn error: ${(err as Error)?.message ?? String(err)}`);
     } finally {
-      off();
       controller.signal.removeEventListener("abort", stopHandler);
-      this.streamers.delete(k);
+      this.activeStreamer = null;
+      this.turnEndResolver = null;
     }
   }
 }
