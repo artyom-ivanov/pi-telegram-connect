@@ -308,17 +308,35 @@ export class TelegramBot {
 
   private async runTurn(item: QueueItem, controller: AbortController): Promise<void> {
     const ctx = item.ctx;
+    const chatId = ctx.chat!.id;
+    const threadId = ctx.message?.message_thread_id;
 
     const streamer = new Streamer({
-      client: rateLimited(ctx.api as any, this.rateLimiter, ctx.chat!.id),
-      chatId: ctx.chat!.id,
-      threadId: ctx.message?.message_thread_id ?? 0,
+      client: rateLimited(ctx.api as any, this.rateLimiter, chatId),
+      chatId,
+      threadId: threadId ?? 0,
       throttleMs: 3000,
       ageResetMs: 60_000,
       ...(item.replyToMessageId !== undefined ? { replyToOnFirst: item.replyToMessageId } : {}),
     });
     this.activeStreamer = streamer;
     streamer.beginTurn();
+
+    // Telegram "typing..." indicator lasts ~5s and must be re-pinged. Send immediately,
+    // then every 4s until the turn ends. Forum-topic threads need the message_thread_id.
+    const sendTyping = async (): Promise<void> => {
+      try {
+        const opts: { message_thread_id?: number } = {};
+        if (threadId !== undefined && threadId > 0) opts.message_thread_id = threadId;
+        await (ctx.api as any).sendChatAction(chatId, "typing", opts);
+      } catch {
+        // network or 403 (bot blocked) — swallow; the turn will surface the error elsewhere.
+      }
+    };
+    void sendTyping();
+    const typingTimer = setInterval(() => {
+      void sendTyping();
+    }, 4000);
 
     const turnEnded = new Promise<void>((resolve) => {
       this.turnEndResolver = resolve;
@@ -335,14 +353,12 @@ export class TelegramBot {
       // Push the message into the pi session. We send text only — image inlining
       // through pi.sendUserMessage requires the multimedia content array form,
       // which we keep simple in V1: include image-source mention as a path in text.
-      // (The image was downloaded to disk by normalizeMessage; we surface its path.)
       let sendText = item.promptText;
       if (item.images.length > 0) {
         sendText += `\n\n[telegram inline images: ${item.images.length} (base64 omitted; sent separately)]`;
       }
       this.opts.pi.sendUserMessage(sendText);
-      // Wait for turn_end. If pi never fires it (shouldn't happen), we'd hang —
-      // fall back: bound the wait to 10 minutes.
+      // Wait for turn_end. If pi never fires it (shouldn't happen), bound the wait.
       const timeout = new Promise<void>((res) => setTimeout(res, 10 * 60_000));
       await Promise.race([turnEnded, timeout]);
       await streamer.flush();
@@ -350,6 +366,7 @@ export class TelegramBot {
     } catch (err) {
       this.opts.cliLog(`runTurn error: ${(err as Error)?.message ?? String(err)}`);
     } finally {
+      clearInterval(typingTimer);
       controller.signal.removeEventListener("abort", stopHandler);
       this.activeStreamer = null;
       this.turnEndResolver = null;

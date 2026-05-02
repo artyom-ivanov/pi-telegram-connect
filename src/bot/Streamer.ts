@@ -41,6 +41,8 @@ export class Streamer {
   private skipDecisionBuffer = "";
   private skipResolved = false;
   private skipConfirmed = false;
+  /** Last text successfully sent (after rendering). Used to short-circuit identical re-sends. */
+  private lastSentText = "";
   private opts: Required<StreamerOptions>;
 
   constructor(opts: StreamerOptions) {
@@ -62,6 +64,7 @@ export class Streamer {
     this.skipDecisionBuffer = "";
     this.skipResolved = false;
     this.skipConfirmed = false;
+    this.lastSentText = "";
   }
 
   appendDelta(delta: string): void {
@@ -107,12 +110,19 @@ export class Streamer {
 
   private scheduleEdit(immediate = false): void {
     if (this.skipConfirmed) return;
-    if (this.pendingEditTimer) clearTimeout(this.pendingEditTimer);
     if (immediate) {
-      this.pendingEditTimer = null;
+      if (this.pendingEditTimer) {
+        clearTimeout(this.pendingEditTimer);
+        this.pendingEditTimer = null;
+      }
       void this.fireEdit();
       return;
     }
+    // Periodic throttle: do NOT reset the pending timer on each delta — that turns
+    // throttle into debounce and never fires while tokens stream faster than throttleMs.
+    // Instead: first delta schedules an edit; subsequent deltas accumulate in bodyBuffer
+    // and ride the same scheduled edit. After it fires, the next delta schedules again.
+    if (this.pendingEditTimer) return;
     this.pendingEditTimer = setTimeout(() => {
       this.pendingEditTimer = null;
       void this.fireEdit();
@@ -123,6 +133,9 @@ export class Streamer {
     if (this.inFlightEdit) await this.inFlightEdit.catch(() => undefined);
     const text = this.renderBody();
     if (text.length === 0) return;
+    // Short-circuit identical re-sends — Telegram returns "message is not modified"
+    // and double-counted toward our rate limit. Also avoids redundant work in flush+finalize.
+    if (text === this.lastSentText) return;
     let html: string;
     try {
       html = mdToHtml(text);
@@ -140,6 +153,7 @@ export class Streamer {
       this.inFlightEdit = this.opts.client.sendMessage(args).then((r) => {
         this.previewMessageId = r.message_id;
         this.previewCreatedAt = Date.now();
+        this.lastSentText = text;
       }).catch((err) => this.tryHtmlFallback(text, err));
     } else {
       const messageId = this.previewMessageId;
@@ -148,6 +162,8 @@ export class Streamer {
         message_id: messageId,
         text: html,
         parse_mode: "HTML",
+      }).then(() => {
+        this.lastSentText = text;
       }).catch((err) => this.tryHtmlFallback(text, err, messageId));
     }
     await this.inFlightEdit;
