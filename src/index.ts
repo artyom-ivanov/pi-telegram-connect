@@ -56,17 +56,28 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   const turnEndCbs = new Set<Cb<[]>>();
 
   pi.on("message_update", (e: any) => {
-    const text = e?.delta?.text;
-    if (typeof text === "string" && text.length > 0) {
-      for (const cb of deltaCbs) cb(text);
+    // Real event shape (from @mariozechner/pi-coding-agent extensions/types.d.ts):
+    //   { type: "message_update", message, assistantMessageEvent }
+    // assistantMessageEvent is a discriminated union from @mariozechner/pi-ai;
+    // text streaming uses { type: "text_delta", delta: string, ... }.
+    const ev = e?.assistantMessageEvent;
+    if (ev?.type === "text_delta" && typeof ev.delta === "string" && ev.delta.length > 0) {
+      for (const cb of deltaCbs) cb(ev.delta);
     }
   });
   pi.on("tool_execution_start", (e: any) => {
-    const name = String(e?.toolName ?? e?.tool ?? "tool");
-    const args = String(e?.argsSummary ?? "");
-    for (const cb of toolStartCbs) cb(name, args);
+    // Real shape: { type, toolCallId, toolName, args }
+    const name = String(e?.toolName ?? "tool");
+    let argsSummary = "";
+    try {
+      argsSummary = JSON.stringify(e?.args ?? {}).slice(0, 80);
+    } catch {
+      argsSummary = "";
+    }
+    for (const cb of toolStartCbs) cb(name, argsSummary);
   });
   pi.on("tool_execution_end", (e: any) => {
+    // Real shape: { type, toolCallId, toolName, result, isError }
     const name = String(e?.toolName ?? "tool");
     for (const cb of toolEndCbs) cb(name);
   });
