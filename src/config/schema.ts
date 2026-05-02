@@ -87,26 +87,3 @@ export const DEFAULT_CONFIG: Config = {
   },
 };
 
-export const StickerCacheSchema = Type.Object({
-  version: Type.Literal(1),
-  entries: Type.Record(
-    Type.String(),
-    Type.Object({
-      emoji: Type.String(),
-      description: Type.String(),
-      describedAt: Type.Number(),
-    }),
-  ),
-  visionCallsToday: Type.Object({
-    date: Type.String(), // YYYY-MM-DD UTC
-    count: Type.Number(),
-  }),
-});
-
-export type StickerCache = Static<typeof StickerCacheSchema>;
-
-export const DEFAULT_STICKER_CACHE: StickerCache = {
-  version: 1,
-  entries: {},
-  visionCallsToday: { date: "1970-01-01", count: 0 },
-};

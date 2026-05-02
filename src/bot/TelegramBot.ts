@@ -5,7 +5,6 @@ import { evaluateAccess } from "./AccessControl.js";
 import { MessageQueue } from "./MessageQueue.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { Streamer } from "./Streamer.js";
-import { StickerCache } from "./StickerCache.js";
 import { resolveDestPath, downloadToPath } from "./MediaIngest.js";
 import { TelegramRateLimiter } from "../util/ratelimit.js";
 import type { Config } from "../config/schema.js";
@@ -32,11 +31,14 @@ export interface PiBridge {
   onToolEnd: (cb: (toolName: string) => void) => () => void;
   /** End-of-turn signal (we treat agent_end and turn_end the same). */
   onTurnEnd: (cb: () => void) => () => void;
+  /** Subscribe to agent_start; the callback receives an `abort` thunk that cancels the running pi agent. */
+  onAgentStart: (cb: (abort: () => void) => void) => () => void;
+  /** Subscribe to agent error events (assistant message ended with stopReason="error"). */
+  onAgentError: (cb: (message: string) => void) => () => void;
 }
 
 export interface TelegramBotOptions {
   configStore: ConfigStore;
-  stickerCache: StickerCache;
   tmpDir: string;
   cliLog: (msg: string) => void;
   pi: PiBridge;
@@ -66,6 +68,8 @@ export class TelegramBot {
   private currentTurnAttachments: string[] = [];
   /** Active turn context — set in runTurn so tools can target the right chat. */
   private activeTurn: { chatId: number; threadId: number; replyToMessageId?: number } | null = null;
+  /** Abort thunk for the currently-running pi agent loop, captured via agent_start. Cleared on turn_end. */
+  private currentAgentAbort: (() => void) | null = null;
 
   /** Single global FIFO key — single-session model. */
   private static readonly GLOBAL_KEY: SessionKey = "0:0";
@@ -136,9 +140,23 @@ export class TelegramBot {
     );
     this.piUnsubs.push(
       this.opts.pi.onTurnEnd(() => {
+        // Pi agent has finished a turn — its abort thunk is no longer relevant.
+        this.currentAgentAbort = null;
         const r = this.turnEndResolver;
         this.turnEndResolver = null;
         if (r) r();
+      }),
+    );
+    this.piUnsubs.push(
+      this.opts.pi.onAgentStart((abort) => {
+        this.currentAgentAbort = abort;
+      }),
+    );
+    this.piUnsubs.push(
+      this.opts.pi.onAgentError((message) => {
+        if (this.activeStreamer) {
+          void this.activeStreamer.appendErrorMarker(message).catch(() => undefined);
+        }
       }),
     );
 
@@ -218,6 +236,15 @@ export class TelegramBot {
 
   private handleStop(): void {
     this.queue?.abortAndClear(TelegramBot.GLOBAL_KEY);
+    // Cancel the pi agent loop if one is running. Without this, the agent keeps
+    // working in pi-CLI even though we're done caring about its output.
+    if (this.currentAgentAbort) {
+      try {
+        this.currentAgentAbort();
+      } catch (e) {
+        this.opts.cliLog(`agent abort failed: ${(e as Error).message}`);
+      }
+    }
     if (this.activeStreamer) {
       void this.activeStreamer.appendStopMarker().catch(() => undefined);
     }

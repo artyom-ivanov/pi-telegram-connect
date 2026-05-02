@@ -4,7 +4,6 @@ import { stat } from "node:fs/promises";
 import { Type } from "@sinclair/typebox";
 import { ConfigStore } from "./config/ConfigStore.js";
 import { TelegramBot, type PiBridge, type UserMessageContent } from "./bot/TelegramBot.js";
-import { StickerCache } from "./bot/StickerCache.js";
 import { GroupAccess } from "./bot/GroupAccess.js";
 import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
 import { assertInsideRoot, expandHome } from "./util/paths.js";
@@ -18,7 +17,7 @@ export interface ExtensionAPILoose {
   // pi event handlers may optionally return a result object that pi merges in
   // (e.g., before_agent_start may return { systemPrompt }). Our loose typing
   // accepts any return value; pi ignores ones it doesn't recognize.
-  on(event: string, handler: (e: any) => any | Promise<any>): void;
+  on(event: string, handler: (e: any, ctx?: any) => any | Promise<any>): void;
   registerCommand(
     name: string,
     options: {
@@ -55,20 +54,9 @@ export interface ExtensionAPILoose {
 export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string; version: string } {
   const home = homedir();
   const configPath = join(home, ".pi", "agent", "telegram-connect.json");
-  const stickerPath = join(home, ".pi", "agent", "telegram-connect-stickers.json");
   const tmpDir = join(home, ".pi", "agent", "tmp", "telegram");
 
   const configStore = new ConfigStore(configPath);
-
-  // Vision is disabled in V1 (extension API doesn't expose ModelRegistry/auth in a clean way).
-  // Sticker descriptions degrade to emoji-only.
-  const stickerCache = new StickerCache({
-    cachePath: stickerPath,
-    maxEntries: 5000,
-    ttlMs: 90 * 24 * 60 * 60 * 1000,
-    maxVisionCallsPerDay: 0,
-    visionFn: async () => null,
-  });
 
   const cliLog = (msg: string) => {
     // pi-CLI loggers vary; the safest place is process.stderr so it shows in pi's debug output.
@@ -83,15 +71,24 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   const toolStartCbs = new Set<Cb<[string, string]>>();
   const toolEndCbs = new Set<Cb<[string]>>();
   const turnEndCbs = new Set<Cb<[]>>();
+  const agentStartCbs = new Set<Cb<[() => void]>>();
+  const agentErrorCbs = new Set<Cb<[string]>>();
 
   pi.on("message_update", (e: any) => {
     // Real event shape (from @mariozechner/pi-coding-agent extensions/types.d.ts):
     //   { type: "message_update", message, assistantMessageEvent }
     // assistantMessageEvent is a discriminated union from @mariozechner/pi-ai;
     // text streaming uses { type: "text_delta", delta: string, ... }.
+    // Errors during streaming arrive as { type: "error", reason, error: AssistantMessage }.
     const ev = e?.assistantMessageEvent;
     if (ev?.type === "text_delta" && typeof ev.delta === "string" && ev.delta.length > 0) {
       for (const cb of deltaCbs) cb(ev.delta);
+    } else if (ev?.type === "error") {
+      const errMsg =
+        typeof ev?.error?.errorMessage === "string"
+          ? ev.error.errorMessage
+          : `agent stream error (reason=${String(ev?.reason ?? "unknown")})`;
+      for (const cb of agentErrorCbs) cb(errMsg);
     }
   });
   pi.on("tool_execution_start", (e: any) => {
@@ -113,9 +110,38 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   pi.on("turn_end", () => {
     for (const cb of turnEndCbs) cb();
   });
-  pi.on("agent_end", () => {
-    // Also surface as turn_end — covers the case where agent_end fires without turn_end.
+  pi.on("agent_end", (e: any) => {
+    // Inspect the last assistant message; if it ended with stopReason "error",
+    // surface it so the active streamer can display _⚠️ error: <msg>_.
+    // Pi pattern matches pi-telegram: messages: AgentMessage[].
+    const messages = Array.isArray(e?.messages) ? e.messages : [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === "assistant") {
+        if (m.stopReason === "error") {
+          const errMsg =
+            typeof m.errorMessage === "string" && m.errorMessage.length > 0
+              ? m.errorMessage
+              : "agent failed";
+          for (const cb of agentErrorCbs) cb(errMsg);
+        }
+        break;
+      }
+    }
     for (const cb of turnEndCbs) cb();
+  });
+  // Capture the abort thunk so /stop can really cancel the agent loop in pi.
+  pi.on("agent_start", (_event: any, ctx: any) => {
+    if (typeof ctx?.abort === "function") {
+      const abort = (): void => {
+        try {
+          ctx.abort();
+        } catch {
+          // ignore — pi may be in a state where abort is a no-op
+        }
+      };
+      for (const cb of agentStartCbs) cb(abort);
+    }
   });
 
   // Inject system-prompt suffix so the agent knows about the Telegram bridge
@@ -161,13 +187,20 @@ Telegram bridge extension is active.
       turnEndCbs.add(cb);
       return () => turnEndCbs.delete(cb);
     },
+    onAgentStart: (cb) => {
+      agentStartCbs.add(cb);
+      return () => agentStartCbs.delete(cb);
+    },
+    onAgentError: (cb) => {
+      agentErrorCbs.add(cb);
+      return () => agentErrorCbs.delete(cb);
+    },
   };
 
   const groupAccess = new GroupAccess({ configStore, cliLog });
 
   const bot = new TelegramBot({
     configStore,
-    stickerCache,
     tmpDir,
     cliLog,
     pi: bridge,
@@ -261,7 +294,6 @@ Telegram bridge extension is active.
 // Public re-exports (if anyone imports the package as a library)
 export { ConfigStore } from "./config/ConfigStore.js";
 export { TelegramBot } from "./bot/TelegramBot.js";
-export { StickerCache } from "./bot/StickerCache.js";
 export type { Config } from "./config/schema.js";
 export type { CliRegistration, CommandCtx } from "./commands/cli.js";
 export type { PiBridge } from "./bot/TelegramBot.js";
