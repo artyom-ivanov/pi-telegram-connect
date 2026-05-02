@@ -61,6 +61,11 @@ export class TelegramBot {
   private activeStreamer: Streamer | null = null;
   /** Resolves when the active turn finishes. Set by runTurn, fulfilled by onTurnEnd. */
   private turnEndResolver: (() => void) | null = null;
+  /** Files queued by the agent (via telegram_attach tool) during the current turn.
+   *  Sent to the active chat after the streamer finalizes. */
+  private currentTurnAttachments: string[] = [];
+  /** Active turn context — set in runTurn so tools can target the right chat. */
+  private activeTurn: { chatId: number; threadId: number; replyToMessageId?: number } | null = null;
 
   /** Single global FIFO key — single-session model. */
   private static readonly GLOBAL_KEY: SessionKey = "0:0";
@@ -72,6 +77,22 @@ export class TelegramBot {
 
   isRunning(): boolean {
     return this.state === "running";
+  }
+
+  /** True while a Telegram-originated turn is being processed. Used by telegram_attach tool. */
+  isInTurn(): boolean {
+    return this.activeTurn !== null;
+  }
+
+  /** Queue a file path to be sent to the active chat after the current turn finalizes. */
+  queueAttachment(absPath: string): void {
+    if (!this.activeTurn) {
+      throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
+    }
+    if (this.currentTurnAttachments.length >= 10) {
+      throw new Error("attachment limit reached (10 per turn)");
+    }
+    this.currentTurnAttachments.push(absPath);
   }
 
   async start(token: string): Promise<void> {
@@ -334,6 +355,13 @@ export class TelegramBot {
     const chatId = ctx.chat!.id;
     const threadId = ctx.message?.message_thread_id;
 
+    this.activeTurn = {
+      chatId,
+      threadId: threadId ?? 0,
+      ...(item.replyToMessageId !== undefined ? { replyToMessageId: item.replyToMessageId } : {}),
+    };
+    this.currentTurnAttachments = [];
+
     const streamer = new Streamer({
       client: rateLimited(ctx.api as any, this.rateLimiter, chatId),
       chatId,
@@ -390,13 +418,62 @@ export class TelegramBot {
       await Promise.race([turnEnded, timeout]);
       await streamer.flush();
       await streamer.finalize();
+      // After the assistant text is finalized, send any queued attachments.
+      if (this.currentTurnAttachments.length > 0) {
+        await this.sendQueuedAttachments(ctx, chatId, threadId);
+      }
     } catch (err) {
       this.opts.cliLog(`runTurn error: ${(err as Error)?.message ?? String(err)}`);
     } finally {
       clearInterval(typingTimer);
       controller.signal.removeEventListener("abort", stopHandler);
       this.activeStreamer = null;
+      this.activeTurn = null;
+      this.currentTurnAttachments = [];
       this.turnEndResolver = null;
+    }
+  }
+
+  private async sendQueuedAttachments(
+    ctx: Context,
+    chatId: number,
+    threadId: number | undefined,
+  ): Promise<void> {
+    const api = ctx.api as any;
+    const threadOpt =
+      threadId !== undefined && threadId > 0 ? { message_thread_id: threadId } : {};
+    for (const absPath of this.currentTurnAttachments) {
+      try {
+        await this.rateLimiter.wait(chatId);
+        const lower = absPath.toLowerCase();
+        const isImage = /\.(jpe?g|png|webp|gif)$/i.test(lower);
+        const isVideo = /\.(mp4|mov|m4v)$/i.test(lower);
+        const isVoice = /\.ogg$/i.test(lower);
+        const isAudio = /\.(mp3|m4a|flac|wav)$/i.test(lower);
+        if (isImage) {
+          await api.sendPhoto(chatId, { source: absPath }, { ...threadOpt });
+        } else if (isVideo) {
+          await api.sendVideo(chatId, { source: absPath }, { ...threadOpt });
+        } else if (isVoice) {
+          await api.sendVoice(chatId, { source: absPath }, { ...threadOpt });
+        } else if (isAudio) {
+          await api.sendAudio(chatId, { source: absPath }, { ...threadOpt });
+        } else {
+          await api.sendDocument(chatId, { source: absPath }, { ...threadOpt });
+        }
+      } catch (err) {
+        this.opts.cliLog(`failed to send attachment ${absPath}: ${(err as Error)?.message ?? err}`);
+        // Surface to user (non-blocking, fire-and-forget):
+        try {
+          await api.sendMessage(
+            chatId,
+            `_⚠️ failed to send file ${absPath.split("/").pop()}: ${(err as Error)?.message ?? "error"}_`,
+            { parse_mode: "HTML", ...threadOpt },
+          );
+        } catch {
+          // ignore
+        }
+      }
     }
   }
 }
