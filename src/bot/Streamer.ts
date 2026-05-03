@@ -237,8 +237,10 @@ export class Streamer {
 
     // Overflow split: if the current segment exceeds maxTextLen, finalize it at a safe
     // boundary (no tool indicator on the finalized chunk), bump committedOffset, reset
-    // previewMessageId so the remainder goes into a new continuation message, then loop.
-    if (text.length > this.opts.maxTextLen) {
+    // previewMessageId so the remainder goes into a new continuation message. Loop —
+    // a single fireEdit may need multiple splits if the body grew far past one chunk
+    // before any throttled flush ran (e.g., a massive single delta).
+    while (text.length > this.opts.maxTextLen) {
       const bodySegment = this.bodyBuffer.slice(this.committedOffset);
       const splitInBody = this.findSplitIndex(bodySegment);
       const finalChunk = bodySegment.slice(0, splitInBody);
@@ -246,7 +248,6 @@ export class Streamer {
       this.committedOffset += splitInBody;
       this.previewMessageId = null;
       this.lastSentText = "";
-      // Continue with the remainder if any.
       const remainder = this.renderCurrent();
       if (remainder.length === 0) return;
       text = remainder;

@@ -1,7 +1,7 @@
 {
   "name": "@artyom-ivanov/pi-telegram-connect",
   "version": "0.1.0",
-  "description": "Telegram connector for the Pi coding agent",
+  "description": "Telegram bridge for the Pi coding agent: pair once, then chat with your local pi-CLI agent from your phone.",
   "license": "MIT",
   "author": "artyom-ivanov",
   "type": "module",
@@ -10,17 +10,39 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": ["dist", "README.md", "LICENSE", "CHANGELOG.md"],
   "engines": { "node": ">=20.6.0" },
+  "keywords": [
+    "pi-cli",
+    "pi-coding-agent",
+    "pi-extension",
+    "pi-package",
+    "telegram",
+    "telegram-bot",
+    "grammy",
+    "ai-agent",
+    "llm",
+    "extension"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artyom-ivanov/pi-telegram-connect.git"
+  },
+  "homepage": "https://github.com/artyom-ivanov/pi-telegram-connect#readme",
+  "bugs": {
+    "url": "https://github.com/artyom-ivanov/pi-telegram-connect/issues"
+  },
   "pi": {
     "extensions": ["./dist/index.js"]
   },
   "scripts": {
+    "prebuild": "rm -rf dist",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint 'src/**/*.ts' 'test/**/*.ts'",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {
     "grammy": "^1.30.0",
