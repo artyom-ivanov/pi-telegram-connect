@@ -24,7 +24,8 @@ export const SYSTEM_PROMPT_SUFFIX = `
 Telegram bridge extension is active.
 - Messages forwarded from Telegram are prefixed with "${TELEGRAM_PREFIX} chat=<id> from=<user_id>]" on their first line.
 - Telegram messages may include local temp file paths under ~/.pi/agent/tmp/telegram/ for attached photos, audio files, voice messages, videos, and documents. Read those files when relevant.
-- "voice message (recorded by user)" and "audio file" are DIFFERENT in Telegram: voice = a microphone recording (Ogg/Opus, often informal), audio = an uploaded music/audio file. The user explicitly chose one or the other; treat them differently when responding.
+- "voice message (recorded by user)" and "audio file" are DIFFERENT in Telegram: voice = a microphone recording (Ogg/Opus, often informal speech) — transcribe and reply conversationally as if it were a text message; audio = an uploaded music or audio file — identify or discuss its content, do NOT assume it's the user speaking.
+- Bracketed markers like \`[user sent sticker …]\`, \`[user reacted …]\`, \`[user attached files]\`, \`[file too large …]\` are internal English metadata. Reply in the user's natural language regardless of these markers; do NOT quote, echo, or translate them in your response.
 - To deliver a file to Telegram: call \`telegram_attach\` with the absolute local path. Auto-classified by extension: .jpg/.png/.webp/.gif → photo, .mp4/.mov → video, .ogg → voice message, .mp3/.m4a/.flac/.wav → audio file, anything else → document. Save artifacts to the current working directory or ~/.pi/agent/tmp/ before attaching (those are the allowed roots).
 - DO NOT assume mentioning a local file path in plain text will send it. Only \`telegram_attach\` actually delivers files.
 - Static stickers (.webp) sent by users arrive as image content you can see directly the FIRST time. Subsequent times the same sticker arrives, the image is omitted (you've already seen it) and only a stable \`sticker_id=<id>\` is shown — recall what it looked like from earlier in the conversation.
@@ -32,7 +33,7 @@ Telegram bridge extension is active.
 - DEFAULT REPLY TO A STICKER IS PLAIN TEXT. Do NOT echo stickers back automatically. \`telegram_send_sticker\` is reserved for the rare case the user EXPLICITLY asks you to send a sticker (e.g., "send me back the same sticker", "react with the sticker I just sent"). The presence of \`sticker_id=<id>\` in the prompt is informational — it does NOT mean you should re-send it.
 - You can react to the user's message with an emoji via \`telegram_react\` (e.g., 👀 to acknowledge a long-awaited message, 👍 for agreement, ❤️ for warmth). Use sparingly — a reaction is a non-verbal acknowledgement, NOT a substitute for a reply. Reactions fire immediately on tool-call. Pass an empty string to clear. Telegram only accepts emojis from its standard palette (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡); obscure or custom emojis are rejected.
 - The user can also react to YOUR messages — those arrive as a synthetic prompt like \`[user reacted to message <id> with 👀]\` or \`[user removed reaction from message <id> (was 👀)]\`. These are non-verbal signals (👀 = "noticed", 👍 = "ack", ❤️ = "thanks", 🤣 = "funny", etc.) — they are NOT a request for a reply.
-- DEFAULT BEHAVIOR FOR INCOMING REACTIONS IS SILENCE. Output EXACTLY \`[[skip]]\` (and nothing else) to stay silent — that suppresses any text reply. Reply with actual text ONLY when the reaction unambiguously invites one (e.g., 🤔 = confusion, 👎 = disagreement). When in doubt, prefer \`[[skip]]\` — over-replying to reactions is annoying.`;
+- DEFAULT BEHAVIOR FOR INCOMING REACTIONS IS SILENCE. Output EXACTLY \`[[skip]]\` as the very FIRST non-whitespace characters of your reply (do NOT prefix with "Sure," / "Okay:" / etc.) — that suppresses any text output. Reply with actual text ONLY when the reaction unambiguously invites one (e.g., 🤔 = confusion, 👎 = disagreement). When in doubt, prefer \`[[skip]]\` — over-replying to reactions is annoying.`;
 
 const STICKER_FALLBACK_EMOJI = "🎴";
 
@@ -144,13 +145,14 @@ export const toolResults = {
   attachFailures: (errors: string[]): string => `Failed: ${errors.join("; ")}`,
 
   stickerNotInTurn:
-    "telegram_send_sticker is only available while replying to a Telegram message.",
+    "telegram_send_sticker is only available while replying to a Telegram message. Continue normally.",
   stickerNotInCache: (id: string): string =>
     `No sticker cached with sticker_id="${id}". The user must have sent that sticker earlier for it to be available.`,
   stickerQueued: (emoji: string | null): string =>
     `Queued sticker (emoji: ${emoji ?? "?"}) for delivery.`,
 
-  reactNotInTurn: "telegram_react is only available while replying to a Telegram message.",
+  reactNotInTurn:
+    "telegram_react is only available while replying to a Telegram message. Continue normally.",
   reactedWith: (emoji: string): string => `Reacted with ${emoji}.`,
   reactionCleared: "Cleared reaction.",
   reactionFailed: (msg: string): string => `Reaction failed: ${msg}`,
