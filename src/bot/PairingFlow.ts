@@ -58,8 +58,6 @@ export class PairingFlow {
         return { ok: false, reason: "mismatch" };
       }
       cfg.owner = senderUserId;
-      cfg.policies.dm = "allowlist";
-      if (!cfg.allowedUsers.includes(senderUserId)) cfg.allowedUsers.push(senderUserId);
       cfg.pendingPairCode = null;
       await this.store.save(cfg);
       return { ok: true, ownerUserId: senderUserId };
@@ -70,8 +68,6 @@ export class PairingFlow {
     return this.serialize(async () => {
       const cfg = await this.store.load();
       cfg.owner = userId;
-      cfg.policies.dm = "allowlist";
-      if (!cfg.allowedUsers.includes(userId)) cfg.allowedUsers.push(userId);
       cfg.pendingPairCode = null;
       await this.store.save(cfg);
     });

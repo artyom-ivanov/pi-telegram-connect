@@ -46,9 +46,26 @@ export class ConfigStore {
       return structuredClone(DEFAULT_CONFIG);
     }
     const versionField = (parsed as { version?: unknown })?.version;
-    if (versionField !== 1) {
+    // v1 → v2 migration: keep botToken, owner, pendingPairCode; drop everything else
+    // (allowlists, policies, group settings, sessions, pendingGroupAccess, dead limits).
+    if (versionField === 1) {
+      const v1 = parsed as { botToken?: unknown; owner?: unknown; pendingPairCode?: unknown };
+      const migrated: Config = {
+        ...structuredClone(DEFAULT_CONFIG),
+        botToken: typeof v1.botToken === "string" ? v1.botToken : null,
+        owner: typeof v1.owner === "number" ? v1.owner : null,
+        pendingPairCode:
+          v1.pendingPairCode && typeof v1.pendingPairCode === "object"
+            ? (v1.pendingPairCode as Config["pendingPairCode"])
+            : null,
+      };
+      // Persist migrated form so subsequent loads are direct.
+      await this.persist(migrated);
+      return migrated;
+    }
+    if (versionField !== 2) {
       throw new Error(
-        `pi-telegram-connect: unknown config schema version ${String(versionField)} in ${this.path}; expected 1`,
+        `pi-telegram-connect: unknown config schema version ${String(versionField)} in ${this.path}; expected 2`,
       );
     }
     if (!Value.Check(ConfigSchema, parsed)) {
@@ -57,6 +74,30 @@ export class ConfigStore {
       return structuredClone(DEFAULT_CONFIG);
     }
     return parsed as Config;
+  }
+
+  /** Internal: write without re-validating (used by migration). Same atomic write semantics. */
+  private async persist(cfg: Config): Promise<void> {
+    await this.mutex.run(async () => {
+      let release: (() => Promise<void>) | null = null;
+      try {
+        release = await lockfile.lock(this.path, { realpath: false, retries: { retries: 5, minTimeout: 50 } });
+      } catch {
+        // ignore
+      }
+      try {
+        const tmp = `${this.path}.tmp.${randomBytes(4).toString("hex")}`;
+        await writeFile(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+        try {
+          await chmod(tmp, 0o600);
+        } catch {
+          // ignore
+        }
+        await rename(tmp, this.path);
+      } finally {
+        if (release) await release().catch(() => undefined);
+      }
+    });
   }
 
   async save(cfg: Config): Promise<void> {

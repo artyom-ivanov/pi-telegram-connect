@@ -48,8 +48,6 @@ export interface TelegramBotOptions {
   tmpDir: string;
   cliLog: (msg: string) => void;
   pi: PiBridge;
-  /** Optional hook (set by extension entry to install GroupAccess on the live grammy Bot). */
-  onBotInit?: (bot: Bot) => void;
 }
 
 interface QueueItem {
@@ -113,13 +111,6 @@ export class TelegramBot {
     await this.opts.configStore.save(cfg);
 
     this.bot = new Bot(token);
-    if (this.opts.onBotInit) {
-      try {
-        this.opts.onBotInit(this.bot);
-      } catch (e) {
-        this.opts.cliLog(`onBotInit hook error: ${(e as Error).message}`);
-      }
-    }
     const pairing = new PairingFlow(this.opts.configStore);
 
     this.queue = new MessageQueue<QueueItem>({
@@ -182,11 +173,7 @@ export class TelegramBot {
       const decision = evaluateAccess({
         config: cfgNow,
         chatType,
-        chatId: ctx.chat.id,
-        threadId: ctx.message.message_thread_id ?? 0,
         senderId,
-        isReplyToBot: ctx.message.reply_to_message?.from?.id === ctx.me.id,
-        hasMentionOfBot: detectMention(ctx, ctx.me.username),
         isPairingCodeAttempt,
         draining: this.state !== "running",
       });
@@ -218,7 +205,7 @@ export class TelegramBot {
     });
 
     this.runner = run(this.bot, {
-      runner: { fetch: { allowed_updates: ["message", "my_chat_member", "callback_query"] } },
+      runner: { fetch: { allowed_updates: ["message"] } },
     } as any);
 
     this.state = "running";
@@ -514,22 +501,6 @@ export class TelegramBot {
       }
     }
   }
-}
-
-function detectMention(ctx: Context, botUsername: string | undefined): boolean {
-  if (!botUsername) return false;
-  const m = ctx.message;
-  if (!m) return false;
-  const text = m.text ?? m.caption ?? "";
-  const entities = m.entities ?? m.caption_entities ?? [];
-  for (const ent of entities) {
-    if (ent.type === "mention") {
-      const name = text.slice(ent.offset, ent.offset + ent.length);
-      if (name.toLowerCase() === `@${botUsername.toLowerCase()}`) return true;
-    }
-    if (ent.type === "text_mention" && (ent as any).user?.id === ctx.me.id) return true;
-  }
-  return false;
 }
 
 function rateLimited(api: any, limiter: TelegramRateLimiter, chatId: number) {

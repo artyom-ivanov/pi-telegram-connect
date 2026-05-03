@@ -42,8 +42,6 @@ describe("PairingFlow", () => {
     expect(result).toEqual({ ok: true, ownerUserId: 12345 });
     const cfg = await store.load();
     expect(cfg.owner).toBe(12345);
-    expect(cfg.policies.dm).toBe("allowlist");
-    expect(cfg.allowedUsers).toContain(12345);
     expect(cfg.pendingPairCode).toBeNull();
   });
 
@@ -90,8 +88,6 @@ describe("PairingFlow", () => {
     await flow.setExplicitOwner(98765);
     const cfg = await store.load();
     expect(cfg.owner).toBe(98765);
-    expect(cfg.policies.dm).toBe("allowlist");
-    expect(cfg.allowedUsers).toContain(98765);
     expect(cfg.pendingPairCode).toBeNull();
   });
 

@@ -4,7 +4,6 @@ import { stat } from "node:fs/promises";
 import { Type } from "@sinclair/typebox";
 import { ConfigStore } from "./config/ConfigStore.js";
 import { TelegramBot, type PiBridge, type UserMessageContent } from "./bot/TelegramBot.js";
-import { GroupAccess } from "./bot/GroupAccess.js";
 import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
 import { assertInsideRoot, expandHome } from "./util/paths.js";
 
@@ -192,14 +191,11 @@ Telegram bridge extension is active.
     },
   };
 
-  const groupAccess = new GroupAccess({ configStore, cliLog });
-
   const bot = new TelegramBot({
     configStore,
     tmpDir,
     cliLog,
     pi: bridge,
-    onBotInit: (innerBot) => groupAccess.install(innerBot),
   });
 
   // Inject Telegram bridge instructions ONLY when this turn was initiated by a
