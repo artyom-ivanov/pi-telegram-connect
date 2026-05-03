@@ -21,6 +21,13 @@ export const ConfigSchema = Type.Object({
   botToken: Type.Union([Type.String(), Type.Null()]),
   owner: Type.Union([Type.Number(), Type.Null()]),
   pendingPairCode: Type.Union([PendingPairCodeSchema, Type.Null()]),
+  /**
+   * If true, after the agent's text reply finalizes, append a footer listing
+   * every tool call that ran during the turn (✅/🚫 + name + JSON args).
+   * If false (default), the footer is omitted from the final message; the
+   * "Thinking…" header during the pre-reply phase is shown either way.
+   */
+  showToolFooter: Type.Boolean(),
   limits: Type.Object({
     /** Cloud Bot API getFile is hard-capped at 20 MB. Larger inbound files are skipped. */
     maxIncomingFileMb: Type.Number(),
@@ -38,6 +45,7 @@ export const DEFAULT_CONFIG: Config = {
   botToken: null,
   owner: null,
   pendingPairCode: null,
+  showToolFooter: false,
   limits: {
     maxIncomingFileMb: 20,
     maxOutgoingFileMb: 50,

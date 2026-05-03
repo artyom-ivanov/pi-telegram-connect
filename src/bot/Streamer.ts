@@ -27,6 +27,8 @@ export interface StreamerOptions {
   /** Cut threshold for splitting overlong messages. Telegram hard limit is 4096; we leave headroom for HTML expansion. */
   maxTextLen?: number;
   replyToOnFirst?: MessageId;
+  /** When true, append the tool-call history below the body in the final message. */
+  showToolFooter?: boolean;
 }
 
 type StreamerState = "IDLE" | "DECIDING_SKIP" | "BUFFERING" | "FINALIZING" | "DONE";
@@ -63,10 +65,15 @@ export class Streamer {
   /**
    * Running history of tool calls in the CURRENT turn. Entries are appended on
    * tool_execution_start and updated to "done"/"error" on tool_execution_end.
-   * Rendered as a multi-line italic footer beneath the message body so the user
-   * sees what the agent is doing while it thinks.
+   * - While !hasReplyText: shown as a "Thinking…" header ABOVE the (empty) body so
+   *   the user sees what the agent is doing during the pre-reply phase.
+   * - Once the agent starts streaming text (hasReplyText=true): the header disappears.
+   *   At finalize, if `opts.showToolFooter`, the history is rendered as a footer below
+   *   the body; otherwise it's omitted from the final message.
    */
   private toolHistory: ToolHistoryEntry[] = [];
+  /** Flips true on the first non-empty `appendDelta` after skip resolution. */
+  private hasReplyText = false;
   private previewMessageId: MessageId | null = null;
   private previewCreatedAt = 0;
   private pendingEditTimer: NodeJS.Timeout | null = null;
@@ -89,6 +96,7 @@ export class Streamer {
     this.opts = {
       maxTextLen: 3800,
       replyToOnFirst: 0,
+      showToolFooter: false,
       ...opts,
     } as Required<StreamerOptions>;
   }
@@ -97,6 +105,7 @@ export class Streamer {
     this.state = "DECIDING_SKIP";
     this.bodyBuffer = "";
     this.toolHistory = [];
+    this.hasReplyText = false;
     this.previewMessageId = null;
     this.previewCreatedAt = 0;
     this.pendingEditTimer = null;
@@ -122,18 +131,33 @@ export class Streamer {
         this.skipResolved = true;
         this.bodyBuffer += this.skipDecisionBuffer;
         this.skipDecisionBuffer = "";
+        if (this.skipDecisionBuffer.length > 0 || this.bodyBuffer.length > 0) {
+          this.hasReplyText = true;
+        }
         this.scheduleEdit();
         return;
       }
       return;
     }
     this.bodyBuffer += delta;
+    if (delta.trim().length > 0) this.hasReplyText = true;
     this.scheduleEdit();
   }
 
   toolStart(name: string, argsSummary: string): void {
+    // A tool firing means the agent is doing real work, not silent-skipping. Force
+    // skip resolution if it was still pending — this lets us render the "Thinking…"
+    // header even when tools fire before any text delta.
+    if (!this.skipResolved) {
+      this.skipResolved = true;
+      if (this.skipDecisionBuffer.length > 0) {
+        this.bodyBuffer += this.skipDecisionBuffer;
+        this.skipDecisionBuffer = "";
+        if (this.bodyBuffer.trim().length > 0) this.hasReplyText = true;
+      }
+    }
     this.toolHistory.push({ name, argsSummary, status: "running" });
-    if (this.skipResolved && !this.skipConfirmed) this.scheduleEdit(true);
+    this.scheduleEdit(true);
   }
 
   toolEnd(name: string, ok: boolean = true): void {
@@ -148,9 +172,23 @@ export class Streamer {
     if (this.skipResolved && !this.skipConfirmed) this.scheduleEdit(true);
   }
 
-  /** Render the current message text — what the active preview should show right now. */
+  /**
+   * Render the current message text — what the active preview should show right now.
+   *
+   * Two modes:
+   *   1. Thinking phase (no reply text yet): show "Thinking…" header + tool history.
+   *      The body slice is empty in this phase by definition.
+   *   2. Reply phase (hasReplyText): show body. Append tool footer iff `showToolFooter`.
+   */
   private renderCurrent(): string {
-    return this.bodyBuffer.slice(this.committedOffset) + streamerMarkers.toolHistory(this.toolHistory);
+    const body = this.bodyBuffer.slice(this.committedOffset);
+    if (!this.hasReplyText) {
+      return streamerMarkers.thinkingHeader(this.toolHistory);
+    }
+    if (this.opts.showToolFooter) {
+      return body + streamerMarkers.toolFooter(this.toolHistory);
+    }
+    return body;
   }
 
   private scheduleEdit(immediate = false): void {

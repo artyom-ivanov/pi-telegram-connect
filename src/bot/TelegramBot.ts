@@ -475,12 +475,14 @@ export class TelegramBot {
     };
     this.currentTurnAttachments = [];
 
+    const cfg = await this.opts.configStore.load();
     const streamer = new Streamer({
       client: rateLimited(ctx.api as any, this.rateLimiter, chatId),
       chatId,
       threadId: threadId ?? 0,
       throttleMs: 3000,
       ageResetMs: 60_000,
+      showToolFooter: cfg.showToolFooter,
       ...(item.replyToMessageId !== undefined ? { replyToOnFirst: item.replyToMessageId } : {}),
     });
     this.activeStreamer = streamer;

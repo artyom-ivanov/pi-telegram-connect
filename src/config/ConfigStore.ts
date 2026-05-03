@@ -68,17 +68,23 @@ export class ConfigStore {
         `pi-telegram-connect: unknown config schema version ${String(versionField)} in ${this.path}; expected 2`,
       );
     }
-    // Forward-compat fill-in: when we add new optional limits in later patches,
+    // Forward-compat fill-in: when we add new optional fields in later patches,
     // existing v2 configs lack them. Rather than backup-and-reset (losing botToken
-    // and owner), fill in defaults for any missing limits before validation.
-    const p = parsed as { limits?: Record<string, unknown> };
-    if (p.limits && typeof p.limits === "object") {
-      const defaults = DEFAULT_CONFIG.limits as unknown as Record<string, unknown>;
-      for (const k of Object.keys(defaults)) {
-        if (typeof p.limits[k] !== "number") p.limits[k] = defaults[k];
-      }
+    // and owner), fill in defaults for any missing top-level field or limits sub-field.
+    const p = parsed as Record<string, unknown>;
+    const topDefaults = DEFAULT_CONFIG as unknown as Record<string, unknown>;
+    for (const k of Object.keys(topDefaults)) {
+      if (k === "limits") continue; // handled below
+      if (p[k] === undefined) p[k] = structuredClone(topDefaults[k]);
+    }
+    const limitsDefaults = DEFAULT_CONFIG.limits as unknown as Record<string, unknown>;
+    if (!p.limits || typeof p.limits !== "object") {
+      p.limits = structuredClone(DEFAULT_CONFIG.limits);
     } else {
-      (parsed as { limits: unknown }).limits = structuredClone(DEFAULT_CONFIG.limits);
+      const lim = p.limits as Record<string, unknown>;
+      for (const k of Object.keys(limitsDefaults)) {
+        if (lim[k] === undefined) lim[k] = limitsDefaults[k];
+      }
     }
     if (!Value.Check(ConfigSchema, parsed)) {
       const backup = `${this.path}.broken.${Date.now()}`;

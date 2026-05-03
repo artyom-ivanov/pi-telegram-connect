@@ -156,11 +156,18 @@ export const toolResults = {
   reactionFailed: (msg: string): string => `Reaction failed: ${msg}`,
 };
 
-/** A tool-call entry in the streamer's tool-history footer. */
+/** A tool-call entry rendered into the streamer's tool-history block. */
 export type ToolHistoryEntry = {
   status: "running" | "done" | "error";
   name: string;
   argsSummary: string;
+};
+
+const TOOL_ARGS_TRIM = 120;
+const formatToolLine = (e: ToolHistoryEntry): string => {
+  const args = e.argsSummary.length > TOOL_ARGS_TRIM ? e.argsSummary.slice(0, TOOL_ARGS_TRIM) + "…" : e.argsSummary;
+  const symbol = e.status === "running" ? "⚙️" : e.status === "done" ? "✅" : "🚫";
+  return `${symbol} ${e.name}(${args})`;
 };
 
 /**
@@ -169,20 +176,27 @@ export type ToolHistoryEntry = {
  */
 export const streamerMarkers = {
   /**
-   * Render a tool-call history as a multi-line italic footer beneath the message body.
-   * Each entry is one line: ⚙️ for running, ✓ for done, ✗ for error.
-   * Returns empty string when there are no entries.
+   * Header rendered ABOVE the message body while the agent is still "thinking" —
+   * i.e., it has emitted no text deltas yet, only tool calls. Disappears as soon
+   * as the first text delta arrives. Always shown regardless of `showToolFooter`.
    */
-  toolHistory: (entries: ReadonlyArray<ToolHistoryEntry>): string => {
+  thinkingHeader: (entries: ReadonlyArray<ToolHistoryEntry>): string => {
+    const lines = ["_Thinking…_"];
+    for (const e of entries) lines.push(`_${formatToolLine(e)}_`);
+    return lines.join("\n");
+  },
+
+  /**
+   * Footer appended BELOW the message body in the FINAL streamed reply. Only emitted
+   * when the user has opted in via `config.showToolFooter`. Returns empty when there
+   * are no tool calls to show.
+   */
+  toolFooter: (entries: ReadonlyArray<ToolHistoryEntry>): string => {
     if (entries.length === 0) return "";
-    const lines = entries.map((e) => {
-      const argsTrim = e.argsSummary.length > 60 ? e.argsSummary.slice(0, 60) + "…" : e.argsSummary;
-      if (e.status === "running") return `_⚙️ ${e.name}(${argsTrim})…_`;
-      if (e.status === "done") return `_✓ ${e.name}(${argsTrim})_`;
-      return `_✗ ${e.name}(${argsTrim})_`;
-    });
+    const lines = entries.map((e) => `_${formatToolLine(e)}_`);
     return `\n\n${lines.join("\n")}`;
   },
+
   stopped: "\n\n_⏹ stopped_",
   error: (msg: string): string => `\n\n_⚠️ error: ${msg}_`,
   attachmentSendFailureSuffix: (label: string, error: string): string =>
