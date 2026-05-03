@@ -14,7 +14,7 @@ describe("Streamer [[skip]] handling", () => {
       chatId: 100,
       threadId: 0,
       throttleMs: 3000,
-      ageResetMs: 60_000,
+
     });
   });
 

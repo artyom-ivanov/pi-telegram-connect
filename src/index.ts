@@ -257,7 +257,11 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
             }
           }
           if (!inSandbox) {
-            errors.push(`${inputPath}: outside allowed roots (${outboundRoots.join(", ")})`);
+            // Don't echo the actual outboundRoots paths back to the agent — those leak
+            // the user's home/cwd into the agent transcript (and from there potentially
+            // back to the chat via prompt-injection). The agent is told the rule in the
+            // tool description; a generic refusal is enough.
+            errors.push(`${inputPath}: outside allowed roots`);
             continue;
           }
           const st = await stat(abs);

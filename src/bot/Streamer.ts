@@ -23,7 +23,6 @@ export interface StreamerOptions {
   chatId: ChatId;
   threadId: ThreadId;
   throttleMs: number;
-  ageResetMs: number;
   /** Cut threshold for splitting overlong messages. Telegram hard limit is 4096; we leave headroom for HTML expansion. */
   maxTextLen?: number;
   replyToOnFirst?: MessageId;
@@ -302,13 +301,17 @@ export class Streamer {
     if (/can't parse entities/i.test(msg)) {
       const plain = htmlToPlain(text);
       if (editMessageId) {
-        await this.opts.client
+        const ok = await this.opts.client
           .editMessageText({
             chat_id: this.opts.chatId,
             message_id: editMessageId,
             text: plain,
           })
-          .catch(() => undefined);
+          .then(() => true)
+          .catch(() => false);
+        // Track lastSentText after fallback so the short-circuit in fireEdit prevents
+        // re-running the entire fallback path on every subsequent edit in this turn.
+        if (ok) this.lastSentText = text;
       } else {
         const args: Parameters<TelegramSendCalls["sendMessage"]>[0] = {
           chat_id: this.opts.chatId,
@@ -319,11 +322,20 @@ export class Streamer {
         if (r) {
           this.previewMessageId = r.message_id;
           this.previewCreatedAt = Date.now();
+          this.lastSentText = text;
         }
       }
       return;
     }
-    if (/message is not modified/i.test(msg)) return;
+    // 'message is not modified' = identical content, treat as success — record lastSentText
+    // so fireEdit's short-circuit prevents re-trying the same edit forever.
+    if (/message is not modified/i.test(msg)) {
+      this.lastSentText = text;
+      return;
+    }
+    // Other errors (429, network, "message to edit not found", etc.) are swallowed silently
+    // for now — the next delta scheduling will retry; if the message was deleted, the next
+    // sendMessage path (previewMessageId === null was already set on rotation) handles it.
   }
 
   async flush(): Promise<void> {
@@ -360,27 +372,34 @@ export class Streamer {
   }
 
   async appendStopMarker(): Promise<void> {
-    if (this.skipConfirmed) {
+    if (this.skipConfirmed || this.state === "DONE") {
       this.state = "DONE";
       return;
     }
+    // Set DONE synchronously BEFORE awaiting flush. This prevents late `appendDelta`
+    // calls (pi takes time to actually abort) from re-mutating bodyBuffer after the
+    // stop marker is appended — they'd otherwise overwrite "_⏹ stopped_".
+    this.state = "DONE";
     // Resolve any in-flight tool entries so the rendered footer stops showing spinners.
     for (const e of this.toolHistory) if (e.status === "running") e.status = "error";
     this.bodyBuffer += streamerMarkers.stopped;
+    // Force render path even if no body text was produced (thinking phase): otherwise
+    // renderCurrent would return only the thinking header and the stop marker would be invisible.
+    this.hasReplyText = true;
     await this.flush();
-    this.state = "DONE";
   }
 
   /** Append an error marker and finalize. Used when the agent errors out mid-turn. */
   async appendErrorMarker(message: string): Promise<void> {
-    if (this.skipConfirmed) {
+    if (this.skipConfirmed || this.state === "DONE") {
       this.state = "DONE";
       return;
     }
+    this.state = "DONE";
     for (const e of this.toolHistory) if (e.status === "running") e.status = "error";
     const safe = message.replace(/[\r\n]+/g, " ").slice(0, 200);
     this.bodyBuffer += streamerMarkers.error(safe);
+    this.hasReplyText = true;
     await this.flush();
-    this.state = "DONE";
   }
 }

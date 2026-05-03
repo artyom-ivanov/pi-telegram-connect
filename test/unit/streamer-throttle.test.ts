@@ -9,7 +9,7 @@ describe("Streamer throttle", () => {
 
   it("trailing-edge throttle: 20 deltas in 6s with 3000ms throttle → ≤ 3 edit/send calls", async () => {
     const client = new MockTelegramClient();
-    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
     for (let i = 0; i < 20; i++) {
       s.appendDelta(`token${i} `);
@@ -26,7 +26,7 @@ describe("Streamer throttle", () => {
 
   it("flush() awaits in-flight and forces a final edit so terminal text always lands", async () => {
     const client = new MockTelegramClient();
-    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
     s.appendDelta("hello world final");
     await s.flush();
@@ -41,7 +41,7 @@ describe("Streamer throttle", () => {
 
   it("tool start before any text deltas → renders 'Thinking…' header with tool name", async () => {
     const client = new MockTelegramClient();
-    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
     // No appendDelta — agent calls a tool before saying anything (the "thinking" phase).
     s.toolStart("bash", '{"command":"ls -F"}');
@@ -57,7 +57,7 @@ describe("Streamer throttle", () => {
 
   it("once text streaming starts, the 'Thinking…' header is replaced by body text", async () => {
     const client = new MockTelegramClient();
-    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
     s.toolStart("bash", '{"command":"ls"}');
     await vi.advanceTimersByTimeAsync(50);
@@ -82,7 +82,7 @@ describe("Streamer throttle", () => {
       chatId: 1,
       threadId: 0,
       throttleMs: 3000,
-      ageResetMs: 60_000,
+
       showToolFooter: true,
     });
     s.beginTurn();

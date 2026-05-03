@@ -83,6 +83,8 @@ export class TelegramBot {
   private activeTurn: { chatId: number; threadId: number; replyToMessageId?: number } | null = null;
   /** Abort thunk for the currently-running pi agent loop, captured via agent_start. Cleared on turn_end. */
   private currentAgentAbort: (() => void) | null = null;
+  /** Aborted on bot.stop() to cancel in-flight inbound media downloads. */
+  private shutdownAbort: AbortController = new AbortController();
 
   /** Single global FIFO key — single-session model. */
   private static readonly GLOBAL_KEY: SessionKey = "0:0";
@@ -136,21 +138,53 @@ export class TelegramBot {
     if (target === undefined) {
       throw new Error("no target message — current turn has no replyToMessageId and none was provided");
     }
+    // Strip variation selector U+FE0F. Telegram's reaction palette uses bare codepoints
+    // (e.g. "❤" not "❤️"); the VS-16 form Bot API rejects with 400. The agent and most
+    // input methods produce the VS-16 form by default, so normalize here.
+    const normalized = emoji.replace(/️/g, "");
     // Grammy types `emoji` as a literal union of allowed reaction emojis. We accept any
     // string from the agent and let Telegram bounce invalid ones with a 400 — that error
     // is more informative than refusing client-side.
-    const reaction = (emoji ? [{ type: "emoji", emoji }] : []) as any;
+    const reaction = (normalized ? [{ type: "emoji", emoji: normalized }] : []) as any;
     await this.bot.api.setMessageReaction(this.activeTurn.chatId, target, reaction);
   }
 
   async start(token: string): Promise<void> {
     if (this.state !== "stopped") throw new Error(`bot already in state ${this.state}`);
     this.state = "starting";
+    this.shutdownAbort = new AbortController();
     const cfg = await this.opts.configStore.load();
+    const previousToken = cfg.botToken;
     cfg.botToken = token;
     await this.opts.configStore.save(cfg);
 
     this.bot = new Bot(token);
+
+    // Validate the token via getMe BEFORE the runner spins up. A bad token here means
+    // we surface a clear error to the CLI instead of silently printing a pairing code
+    // for a bot that will never receive a single message.
+    try {
+      await this.bot.api.getMe();
+    } catch (err) {
+      this.state = "stopped";
+      this.bot = null;
+      const msg = (err as Error)?.message ?? String(err);
+      throw new Error(`Telegram rejected the bot token: ${msg}`);
+    }
+
+    // Token rotated → cached sticker file_ids belong to a different bot identity and
+    // would 400 on sendSticker. Wipe the cache so it self-rebuilds on first use.
+    if (previousToken !== null && previousToken !== token) {
+      this.opts.cliLog("bot token changed — clearing sticker cache");
+      await this.opts.stickerCache.reset().catch(() => undefined);
+    }
+
+    // Surface unrecoverable runner errors (401 invalid token, 409 conflict, network) to
+    // the CLI instead of letting them escape as unhandled rejections that may crash pi.
+    this.bot.catch((err) => {
+      this.opts.cliLog(`grammy error: ${(err.error as Error)?.message ?? String(err.error)}`);
+    });
+
     const pairing = new PairingFlow(this.opts.configStore);
 
     this.queue = new MessageQueue<QueueItem>({
@@ -253,6 +287,9 @@ export class TelegramBot {
       const upd = ctx.update.message_reaction;
       const senderId = upd.user?.id;
       if (senderId === undefined) return;
+      // Defensive self-skip: Bot API doc says bot's own reactions don't echo, but if that
+      // ever changes (or in relay scenarios), this guard cheaply closes a self-feedback loop.
+      if (senderId === ctx.me.id) return;
       const cfgNow = await this.opts.configStore.load();
       // Owner-only — silently drop non-owner reactions (matches our DM-only access policy).
       if (cfgNow.owner === null || senderId !== cfgNow.owner) return;
@@ -294,6 +331,11 @@ export class TelegramBot {
     if (this.runner) await this.runner.stop().catch(() => undefined);
     for (const off of this.piUnsubs) off();
     this.piUnsubs = [];
+    // Cancel any in-flight inbound media downloads.
+    this.shutdownAbort.abort();
+    // Flush any pending sticker-cache writes so a process exit / disconnect doesn't lose
+    // the last 500 ms of cache updates (debounced writer otherwise drops them).
+    await this.opts.stickerCache.flush().catch(() => undefined);
     this.runner = null;
     this.bot = null;
     this.queue = null;
@@ -351,8 +393,7 @@ export class TelegramBot {
           remoteFilename: filename,
           fileUniqueId,
         });
-        const ac = new AbortController();
-        await downloadToPath({ url, destPath: dest, maxBytes: limit, signal: ac.signal });
+        await downloadToPath({ url, destPath: dest, maxBytes: limit, signal: this.shutdownAbort.signal });
         return dest;
       } catch (e: any) {
         const label = filename ?? fileUniqueId;
@@ -481,7 +522,7 @@ export class TelegramBot {
       chatId,
       threadId: threadId ?? 0,
       throttleMs: 3000,
-      ageResetMs: 60_000,
+
       showToolFooter: cfg.showToolFooter,
       ...(item.replyToMessageId !== undefined ? { replyToOnFirst: item.replyToMessageId } : {}),
     });
@@ -531,6 +572,10 @@ export class TelegramBot {
       // Wait for turn_end. If pi never fires it (shouldn't happen), bound the wait.
       const timeout = new Promise<void>((res) => setTimeout(res, 10 * 60_000));
       await Promise.race([turnEnded, timeout]);
+      // Stop the typing-indicator pings BEFORE flushing the final reply — otherwise the
+      // 4s tick can fire concurrently with sendMessage and the user briefly sees
+      // "typing…" overlap with the just-arrived message.
+      clearInterval(typingTimer);
       await streamer.flush();
       await streamer.finalize();
       // After the assistant text is finalized, send any queued attachments.
@@ -540,7 +585,7 @@ export class TelegramBot {
     } catch (err) {
       this.opts.cliLog(`runTurn error: ${(err as Error)?.message ?? String(err)}`);
     } finally {
-      clearInterval(typingTimer);
+      clearInterval(typingTimer); // idempotent if already cleared above
       controller.signal.removeEventListener("abort", stopHandler);
       this.activeStreamer = null;
       this.activeTurn = null;

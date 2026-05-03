@@ -11,7 +11,7 @@ describe("/stop semantics", () => {
 
   it("appendStopMarker finalizes preview with _⏹ stopped_ and prevents further edits", async () => {
     const client = new MockTelegramClient();
-    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
     s.appendDelta("partial answer in progress");
     await vi.advanceTimersByTimeAsync(3500);

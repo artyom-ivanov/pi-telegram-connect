@@ -26,7 +26,10 @@ export function mdToHtml(md: string): string {
     .replace(/<\/?ol[^>]*>/gi, "")
     .replace(/<li[^>]*>/gi, "• ")
     .replace(/<\/li>/gi, "\n")
-    .replace(/<\/?p[^>]*>/gi, "")
+    // BUG GUARD: `/<\/?p[^>]*>/` would also match `<pre>` / `</pre>` (greedy `[^>]*` consumes "re"),
+    // breaking every fenced code block (Telegram needs <pre><code class="lang-x"> intact).
+    // Anchor strictly: closing `>` immediately or with whitespace+attrs after `p`.
+    .replace(/<\/?p(?=[\s>])[^>]*>/gi, "")
     .replace(/<hr[^>]*>/gi, "\n———\n")
     .replace(/<br\s*\/?>(?:\n)?/gi, "\n")
     .replace(/<table[\s\S]*?<\/table>/gi, "")
