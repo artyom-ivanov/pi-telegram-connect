@@ -31,7 +31,7 @@ export interface PiBridge {
   /** Subscribe to message-text deltas. The returned function unsubscribes. */
   onMessageDelta: (cb: (text: string) => void) => () => void;
   onToolStart: (cb: (toolName: string, argsSummary: string) => void) => () => void;
-  onToolEnd: (cb: (toolName: string) => void) => () => void;
+  onToolEnd: (cb: (toolName: string, ok: boolean) => void) => () => void;
   /**
    * Fires when pi finishes processing one user message (i.e., the whole
    * agent_start..agent_end span). NOT per turn_end inside that span — pi
@@ -171,8 +171,8 @@ export class TelegramBot {
       }),
     );
     this.piUnsubs.push(
-      this.opts.pi.onToolEnd((name) => {
-        this.activeStreamer?.toolEnd(name);
+      this.opts.pi.onToolEnd((name, ok) => {
+        this.activeStreamer?.toolEnd(name, ok);
       }),
     );
     this.piUnsubs.push(

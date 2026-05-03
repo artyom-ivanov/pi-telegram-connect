@@ -156,13 +156,33 @@ export const toolResults = {
   reactionFailed: (msg: string): string => `Reaction failed: ${msg}`,
 };
 
+/** A tool-call entry in the streamer's tool-history footer. */
+export type ToolHistoryEntry = {
+  status: "running" | "done" | "error";
+  name: string;
+  argsSummary: string;
+};
+
 /**
  * Italic markers appended to the streamed Telegram reply (visible to the user).
  * These run through the formatter, so leading `\n\n` separates them from prior content.
  */
 export const streamerMarkers = {
-  toolIndicator: (name: string, argsSummary: string): string =>
-    `\n\n_⚙️ running: ${name}(${argsSummary})_`,
+  /**
+   * Render a tool-call history as a multi-line italic footer beneath the message body.
+   * Each entry is one line: ⚙️ for running, ✓ for done, ✗ for error.
+   * Returns empty string when there are no entries.
+   */
+  toolHistory: (entries: ReadonlyArray<ToolHistoryEntry>): string => {
+    if (entries.length === 0) return "";
+    const lines = entries.map((e) => {
+      const argsTrim = e.argsSummary.length > 60 ? e.argsSummary.slice(0, 60) + "…" : e.argsSummary;
+      if (e.status === "running") return `_⚙️ ${e.name}(${argsTrim})…_`;
+      if (e.status === "done") return `_✓ ${e.name}(${argsTrim})_`;
+      return `_✗ ${e.name}(${argsTrim})_`;
+    });
+    return `\n\n${lines.join("\n")}`;
+  },
   stopped: "\n\n_⏹ stopped_",
   error: (msg: string): string => `\n\n_⚠️ error: ${msg}_`,
   attachmentSendFailureSuffix: (label: string, error: string): string =>

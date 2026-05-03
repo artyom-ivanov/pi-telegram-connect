@@ -78,7 +78,7 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   type Cb<T extends any[]> = (...a: T) => void;
   const deltaCbs = new Set<Cb<[string]>>();
   const toolStartCbs = new Set<Cb<[string, string]>>();
-  const toolEndCbs = new Set<Cb<[string]>>();
+  const toolEndCbs = new Set<Cb<[string, boolean]>>();
   const turnEndCbs = new Set<Cb<[]>>();
   const agentStartCbs = new Set<Cb<[() => void]>>();
   const agentErrorCbs = new Set<Cb<[string]>>();
@@ -114,7 +114,8 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   pi.on("tool_execution_end", (e: any) => {
     // Real shape: { type, toolCallId, toolName, result, isError }
     const name = String(e?.toolName ?? "tool");
-    for (const cb of toolEndCbs) cb(name);
+    const ok = e?.isError !== true;
+    for (const cb of toolEndCbs) cb(name, ok);
   });
   // Note: do NOT fire turnEndCbs on `turn_end`. In pi's model, one user message
   // produces one agent_start..agent_end span containing MULTIPLE turn_start..turn_end

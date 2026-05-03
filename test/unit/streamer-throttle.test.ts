@@ -49,8 +49,33 @@ describe("Streamer throttle", () => {
     s.toolStart("bash", "ls -la");
     await vi.advanceTimersByTimeAsync(50);
     expect(client.calls.length).toBeGreaterThan(0);
-    expect(String(client.calls[client.calls.length - 1]!.args.text)).toContain("running: bash");
+    // Tool history footer renders the tool name + running indicator.
+    const lastText = String(client.calls[client.calls.length - 1]!.args.text);
+    expect(lastText).toContain("bash");
+    expect(lastText).toMatch(/⚙️|running/);
     await s.flush();
     await s.finalize();
+  });
+
+  it("tool history accumulates across multiple tool calls in one turn", async () => {
+    const client = new MockTelegramClient();
+    const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000, ageResetMs: 60_000 });
+    s.beginTurn();
+    s.appendDelta("working...");
+    s.toolStart("bash", "ls");
+    await vi.advanceTimersByTimeAsync(50);
+    s.toolEnd("bash", true);
+    s.toolStart("read_file", "/etc/hosts");
+    await vi.advanceTimersByTimeAsync(50);
+    s.toolEnd("read_file", true);
+    await s.flush();
+    await s.finalize();
+    // Final rendered text should still contain BOTH tool names — history persists.
+    const writes = client.calls.filter(
+      (c) => c.method === "sendMessage" || c.method === "editMessageText",
+    );
+    const last = writes[writes.length - 1];
+    expect(String(last!.args.text)).toContain("bash");
+    expect(String(last!.args.text)).toContain("read_file");
   });
 });

@@ -1,5 +1,5 @@
 import type { ChatId, ThreadId, MessageId } from "../types.js";
-import { streamerMarkers } from "../config/prompts.js";
+import { streamerMarkers, type ToolHistoryEntry } from "../config/prompts.js";
 import { mdToHtml, htmlToPlain } from "./Formatter.js";
 
 export interface TelegramSendCalls {
@@ -60,7 +60,13 @@ function classifySkip(buffer: string, streamEnded: boolean): "skip" | "not-skip"
 export class Streamer {
   private state: StreamerState = "IDLE";
   private bodyBuffer = "";
-  private toolActive: { name: string; argsSummary: string } | null = null;
+  /**
+   * Running history of tool calls in the CURRENT turn. Entries are appended on
+   * tool_execution_start and updated to "done"/"error" on tool_execution_end.
+   * Rendered as a multi-line italic footer beneath the message body so the user
+   * sees what the agent is doing while it thinks.
+   */
+  private toolHistory: ToolHistoryEntry[] = [];
   private previewMessageId: MessageId | null = null;
   private previewCreatedAt = 0;
   private pendingEditTimer: NodeJS.Timeout | null = null;
@@ -90,7 +96,7 @@ export class Streamer {
   beginTurn(): void {
     this.state = "DECIDING_SKIP";
     this.bodyBuffer = "";
-    this.toolActive = null;
+    this.toolHistory = [];
     this.previewMessageId = null;
     this.previewCreatedAt = 0;
     this.pendingEditTimer = null;
@@ -126,22 +132,25 @@ export class Streamer {
   }
 
   toolStart(name: string, argsSummary: string): void {
-    this.toolActive = { name, argsSummary };
+    this.toolHistory.push({ name, argsSummary, status: "running" });
     if (this.skipResolved && !this.skipConfirmed) this.scheduleEdit(true);
   }
 
-  toolEnd(_name: string): void {
-    this.toolActive = null;
+  toolEnd(name: string, ok: boolean = true): void {
+    // Find the most recent entry with this name still in "running" state and resolve it.
+    for (let i = this.toolHistory.length - 1; i >= 0; i--) {
+      const entry = this.toolHistory[i]!;
+      if (entry.status === "running" && entry.name === name) {
+        entry.status = ok ? "done" : "error";
+        break;
+      }
+    }
     if (this.skipResolved && !this.skipConfirmed) this.scheduleEdit(true);
   }
 
   /** Render the current message text — what the active preview should show right now. */
   private renderCurrent(): string {
-    let s = this.bodyBuffer.slice(this.committedOffset);
-    if (this.toolActive) {
-      s += streamerMarkers.toolIndicator(this.toolActive.name, this.toolActive.argsSummary);
-    }
-    return s;
+    return this.bodyBuffer.slice(this.committedOffset) + streamerMarkers.toolHistory(this.toolHistory);
   }
 
   private scheduleEdit(immediate = false): void {
@@ -297,7 +306,7 @@ export class Streamer {
       this.skipDecisionBuffer = "";
       this.skipResolved = true;
     }
-    if (this.bodyBuffer.slice(this.committedOffset).trim().length === 0 && !this.toolActive) return;
+    if (this.bodyBuffer.slice(this.committedOffset).trim().length === 0 && this.toolHistory.length === 0) return;
     await this.fireEdit();
   }
 
@@ -317,7 +326,8 @@ export class Streamer {
       this.state = "DONE";
       return;
     }
-    this.toolActive = null;
+    // Resolve any in-flight tool entries so the rendered footer stops showing spinners.
+    for (const e of this.toolHistory) if (e.status === "running") e.status = "error";
     this.bodyBuffer += streamerMarkers.stopped;
     await this.flush();
     this.state = "DONE";
@@ -329,7 +339,7 @@ export class Streamer {
       this.state = "DONE";
       return;
     }
-    this.toolActive = null;
+    for (const e of this.toolHistory) if (e.status === "running") e.status = "error";
     const safe = message.replace(/[\r\n]+/g, " ").slice(0, 200);
     this.bodyBuffer += streamerMarkers.error(safe);
     await this.flush();
