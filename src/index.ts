@@ -163,7 +163,8 @@ Telegram bridge extension is active.
 - DO NOT assume mentioning a local file path in plain text will send it. Only \`telegram_attach\` actually delivers files.
 - Static stickers (.webp) sent by users arrive as image content you can see directly the FIRST time. Subsequent times the same sticker arrives, the image is omitted (you've already seen it) and only a stable \`sticker_id=<id>\` is shown — recall what it looked like from earlier in the conversation.
 - Video stickers and animated (Lottie) stickers arrive as emoji-only hints (you don't see the actual content).
-- To send a sticker the user previously sent (echo a sticker), call \`telegram_send_sticker\` with the \`sticker_id\` you saw in the prompt. This re-sends the same sticker without re-uploading.`;
+- To send a sticker the user previously sent (echo a sticker), call \`telegram_send_sticker\` with the \`sticker_id\` you saw in the prompt. This re-sends the same sticker without re-uploading.
+- You can react to the user's message with an emoji via \`telegram_react\` (e.g., 👀 to acknowledge a long-awaited message, 👍 for agreement, ❤️ for warmth, 🔥/🤔/😢/etc.). Reactions fire immediately on tool-call (not queued with the rest of the reply). Pass an empty string to clear any reaction. Telegram only accepts a fixed set of emojis from its standard reaction palette — common ones (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡) work; obscure or custom emojis will be rejected.`;
 
   // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
@@ -361,6 +362,74 @@ Telegram bridge extension is active.
         ],
         details: { ok: true, fileId: cached.fileId, emoji: cached.emoji },
       };
+    },
+  });
+
+  // Register the reaction tool. Unlike telegram_attach / telegram_send_sticker which
+  // queue for delivery after the assistant's text turn ends, reactions fire immediately —
+  // useful for "acknowledging" a message ("👀") while the agent is still generating its reply.
+  pi.registerTool({
+    name: "telegram_react",
+    label: "Telegram React",
+    description:
+      "Set an emoji reaction on a Telegram message. Common uses: 👀 to acknowledge you've seen " +
+      "a long-awaited message, 👍 for agreement, ❤️ for warmth. Fires immediately (not queued). " +
+      "Pass empty string to clear any prior reaction. Telegram only accepts emojis from its " +
+      "standard reaction palette (e.g., 👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 👀 🤝 🫡); " +
+      "obscure or custom emojis are rejected with a 400.",
+    promptSnippet: "Set an emoji reaction on the user's message.",
+    promptGuidelines: [
+      "Default target is the user's incoming message that triggered the current turn — usually you don't need to pass messageId.",
+      "Use sparingly: a reaction is a non-verbal acknowledgement, not a substitute for a reply.",
+      "If a reaction is rejected (invalid emoji), the tool returns an error in `details`; pick another emoji from the palette and retry.",
+    ],
+    parameters: Type.Object({
+      emoji: Type.String({
+        description:
+          "The emoji to react with (e.g., '👀', '👍', '❤️'). Pass empty string '' to clear any existing reaction.",
+      }),
+      messageId: Type.Optional(
+        Type.Number({
+          description:
+            "Optional — defaults to the user's incoming message in the current turn. Pass a different message_id to react to an earlier message.",
+        }),
+      ),
+    }),
+    async execute(_toolCallId: string, params: { emoji: string; messageId?: number }) {
+      if (!bot.isInTurn()) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "telegram_react is only available while replying to a Telegram message.",
+            },
+          ],
+          details: { ok: false, reason: "not-in-telegram-turn" },
+        };
+      }
+      try {
+        await bot.setReaction(params.emoji, params.messageId);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: params.emoji ? `Reacted with ${params.emoji}.` : "Cleared reaction.",
+            },
+          ],
+          details: { ok: true, emoji: params.emoji },
+        };
+      } catch (err) {
+        const msg = (err as Error)?.message ?? String(err);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Reaction failed: ${msg}`,
+            },
+          ],
+          details: { ok: false, error: msg },
+        };
+      }
     },
   });
 

@@ -122,6 +122,26 @@ export class TelegramBot {
     this.currentTurnAttachments.push({ kind: "sticker", fileId });
   }
 
+  /**
+   * Set an emoji reaction on a message in the active chat. Fires IMMEDIATELY (not queued).
+   * Pass empty string for `emoji` to clear any existing reaction.
+   * If `messageId` is omitted, reacts to the user's incoming message that triggered the current turn.
+   */
+  async setReaction(emoji: string, messageId?: number): Promise<void> {
+    if (!this.activeTurn || !this.bot) {
+      throw new Error("telegram_react can only be used while replying to an active Telegram turn");
+    }
+    const target = messageId ?? this.activeTurn.replyToMessageId;
+    if (target === undefined) {
+      throw new Error("no target message — current turn has no replyToMessageId and none was provided");
+    }
+    // Grammy types `emoji` as a literal union of allowed reaction emojis. We accept any
+    // string from the agent and let Telegram bounce invalid ones with a 400 — that error
+    // is more informative than refusing client-side.
+    const reaction = (emoji ? [{ type: "emoji", emoji }] : []) as any;
+    await this.bot.api.setMessageReaction(this.activeTurn.chatId, target, reaction);
+  }
+
   async start(token: string): Promise<void> {
     if (this.state !== "stopped") throw new Error(`bot already in state ${this.state}`);
     this.state = "starting";
