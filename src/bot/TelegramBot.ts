@@ -243,8 +243,44 @@ export class TelegramBot {
       this.queue!.enqueue(TelegramBot.GLOBAL_KEY, item);
     });
 
+    // Handle reaction updates from the user (added/removed reactions on a bot message).
+    // Telegram only delivers these when allowed_updates includes "message_reaction".
+    // Bot's own reactions (set via telegram_react) are NOT echoed back as events, so
+    // there's no loop risk.
+    this.bot.on("message_reaction", async (ctx) => {
+      if (this.state !== "running") return;
+      const upd = ctx.update.message_reaction;
+      const senderId = upd.user?.id;
+      if (senderId === undefined) return;
+      const cfgNow = await this.opts.configStore.load();
+      // Owner-only — silently drop non-owner reactions (matches our DM-only access policy).
+      if (cfgNow.owner === null || senderId !== cfgNow.owner) return;
+      if (upd.chat.type !== "private") return;
+
+      const fmtReactions = (arr: ReadonlyArray<{ type: string; emoji?: string }> | undefined): string =>
+        (arr ?? [])
+          .map((r) => (r.type === "emoji" && r.emoji ? r.emoji : "?"))
+          .join("");
+      const oldR = fmtReactions(upd.old_reaction as any);
+      const newR = fmtReactions(upd.new_reaction as any);
+      let body: string;
+      if (newR && !oldR) body = `[user reacted to message ${upd.message_id} with ${newR}]`;
+      else if (!newR && oldR) body = `[user removed reaction from message ${upd.message_id} (was ${oldR})]`;
+      else body = `[user changed reaction on message ${upd.message_id}: ${oldR || "—"} → ${newR || "—"}]`;
+
+      const promptText =
+        `[telegram chat=${upd.chat.id} from=${senderId}]\n\n${body}`;
+      this.queue!.enqueue(TelegramBot.GLOBAL_KEY, {
+        ctx,
+        promptText,
+        images: [],
+        // Don't set replyToMessageId — the user reacted on a bot message; we don't
+        // want our follow-up text reply to threadedly quote the bot's own message.
+      });
+    });
+
     this.runner = run(this.bot, {
-      runner: { fetch: { allowed_updates: ["message"] } },
+      runner: { fetch: { allowed_updates: ["message", "message_reaction"] } },
     } as any);
 
     this.state = "running";
