@@ -10,6 +10,7 @@ import type { StickerCache } from "./StickerCache.js";
 import { resolveDestPath, downloadToPath } from "./MediaIngest.js";
 import { TelegramRateLimiter } from "../util/ratelimit.js";
 import type { Config } from "../config/schema.js";
+import { promptFragments, streamerMarkers, userMessages } from "../config/prompts.js";
 import type { ImageContent, SessionKey } from "../types.js";
 import { expandHome } from "../util/paths.js";
 
@@ -222,7 +223,7 @@ export class TelegramBot {
         const r = await pairing.tryPair(trimmed, senderId);
         if (r.ok) {
           this.opts.cliLog(`Pairing succeeded: owner = ${senderId}`);
-          await ctx.reply("✅ You are now the owner. Use /help to see commands.");
+          await ctx.reply(userMessages.pairSucceeded);
         }
         return;
       }
@@ -234,7 +235,7 @@ export class TelegramBot {
       }
       if (lower === "/reset") {
         // Single-session model: /reset is informational. Real reset would require pi-CLI side.
-        await ctx.reply("Sorry, /reset is not supported in V1 (single-session bridge). Use pi-CLI to reset.");
+        await ctx.reply(userMessages.resetUnsupported);
         return;
       }
 
@@ -264,12 +265,11 @@ export class TelegramBot {
       const oldR = fmtReactions(upd.old_reaction as any);
       const newR = fmtReactions(upd.new_reaction as any);
       let body: string;
-      if (newR && !oldR) body = `[user reacted to message ${upd.message_id} with ${newR}]`;
-      else if (!newR && oldR) body = `[user removed reaction from message ${upd.message_id} (was ${oldR})]`;
-      else body = `[user changed reaction on message ${upd.message_id}: ${oldR || "—"} → ${newR || "—"}]`;
+      if (newR && !oldR) body = promptFragments.reactionAdded(upd.message_id, newR);
+      else if (!newR && oldR) body = promptFragments.reactionRemoved(upd.message_id, oldR);
+      else body = promptFragments.reactionChanged(upd.message_id, oldR, newR);
 
-      const promptText =
-        `[telegram chat=${upd.chat.id} from=${senderId}]\n\n${body}`;
+      const promptText = `${promptFragments.header(upd.chat.id, undefined, senderId)}\n\n${body}`;
       this.queue!.enqueue(TelegramBot.GLOBAL_KEY, {
         ctx,
         promptText,
@@ -323,11 +323,11 @@ export class TelegramBot {
     if (!m) return null;
     const parts: string[] = [];
     parts.push(
-      `[telegram chat=${ctx.chat!.id}${m.message_thread_id ? `:${m.message_thread_id}` : ""} from=${ctx.from?.id ?? "?"}]`,
+      promptFragments.header(ctx.chat!.id, m.message_thread_id, ctx.from?.id ?? "?"),
     );
     if (m.reply_to_message) {
       const snippet = (m.reply_to_message.text ?? m.reply_to_message.caption ?? "").slice(0, 200);
-      parts.push(`[in reply to (msg ${m.reply_to_message.message_id}): ${snippet}]`);
+      parts.push(promptFragments.inReplyTo(m.reply_to_message.message_id, snippet));
     }
     const attached: string[] = [];
     const images: ImageContent[] = [];
@@ -355,10 +355,11 @@ export class TelegramBot {
         await downloadToPath({ url, destPath: dest, maxBytes: limit, signal: ac.signal });
         return dest;
       } catch (e: any) {
+        const label = filename ?? fileUniqueId;
         if ((e?.message ?? "").startsWith("file_too_large")) {
-          attached.push(`[file too large: ${filename ?? fileUniqueId}]`);
+          attached.push(promptFragments.fileTooLarge(label));
         } else {
-          attached.push(`[file unavailable: ${filename ?? fileUniqueId}]`);
+          attached.push(promptFragments.fileUnavailable(label));
         }
         return null;
       }
@@ -373,47 +374,42 @@ export class TelegramBot {
           const buf = await readFile(dest);
           images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/jpeg" });
         } catch {
-          attached.push(`[photo ingest error]`);
+          attached.push(promptFragments.photoIngestError);
         }
       }
     }
     if (m.voice) {
       // Voice = recorded-via-Telegram Ogg/Opus message. ALWAYS distinct from m.audio.
       const dest = await downloadFile(m.voice.file_id, m.voice.file_unique_id, "voice.ogg");
-      if (dest) attached.push(`- voice message (recorded by user, ${m.voice.duration}s): ${dest}`);
+      if (dest) attached.push(promptFragments.voiceMessage(m.voice.duration, dest));
     }
     if (m.audio) {
       // Audio = uploaded audio file (mp3/m4a/flac/wav/ogg). NOT a voice message.
       const name = m.audio.file_name ?? "audio";
-      const title = m.audio.title ? ` "${m.audio.title}"` : "";
-      const performer = m.audio.performer ? ` by ${m.audio.performer}` : "";
       const dest = await downloadFile(m.audio.file_id, m.audio.file_unique_id, name);
       if (dest) {
-        attached.push(`- audio file${title}${performer} (${m.audio.duration}s): ${dest}`);
+        attached.push(promptFragments.audioFile(dest, m.audio.duration, m.audio.title, m.audio.performer));
       }
     }
     if (m.video) {
       const dest = await downloadFile(m.video.file_id, m.video.file_unique_id, m.video.file_name ?? "video.mp4");
-      if (dest) attached.push(`- video (${m.video.duration}s): ${dest}`);
+      if (dest) attached.push(promptFragments.video(m.video.duration, dest));
     }
     if (m.document) {
       const dest = await downloadFile(m.document.file_id, m.document.file_unique_id, m.document.file_name ?? "file");
-      if (dest) attached.push(`- document: ${dest}`);
+      if (dest) attached.push(promptFragments.document(dest));
     }
     if (m.sticker) {
       const sk = m.sticker;
       const kind: "static" | "video" | "lottie" =
         sk.is_animated ? "lottie" : sk.is_video ? "video" : "static";
-      const emoji = sk.emoji ?? "🎴";
       if (kind === "static") {
         // Cache lookup BEFORE any work — if we've seen this sticker before we don't
         // re-download the .webp and don't re-pass it to the agent's vision context;
         // we just inject a stable sticker_id so the agent can echo it back.
         const cached = await this.opts.stickerCache.get(sk.file_unique_id);
         if (cached) {
-          attached.push(
-            `[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id}, seen-before)]`,
-          );
+          attached.push(promptFragments.stickerSeenBefore(sk.emoji ?? null, sk.file_unique_id));
         } else {
           const dest = await downloadFile(sk.file_id, sk.file_unique_id, "sticker.webp");
           let injected = false;
@@ -422,9 +418,7 @@ export class TelegramBot {
               const { readFile } = await import("node:fs/promises");
               const buf = await readFile(dest);
               images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/webp" });
-              attached.push(
-                `[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id}, first-time)]`,
-              );
+              attached.push(promptFragments.stickerFirstTime(sk.emoji ?? null, sk.file_unique_id));
               // Save AFTER successful image ingest so a download-failure doesn't pollute the cache.
               await this.opts.stickerCache.set(sk.file_unique_id, {
                 fileId: sk.file_id,
@@ -437,20 +431,22 @@ export class TelegramBot {
             }
           }
           if (!injected) {
-            attached.push(`[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id})]`);
+            attached.push(promptFragments.stickerNoIngest(sk.emoji ?? null, sk.file_unique_id));
           }
         }
       } else if (kind === "video") {
         // Video stickers — emoji only. Don't download .webm, don't pass to the agent.
-        attached.push(`[user sent a video sticker (emoji: ${emoji})]`);
+        attached.push(promptFragments.videoSticker(sk.emoji ?? null));
       } else {
         // Lottie animated sticker — emoji only.
-        attached.push(`[user sent an animated sticker (emoji: ${emoji})]`);
+        attached.push(promptFragments.animatedSticker(sk.emoji ?? null));
       }
     }
 
     if (attached.length > 0) {
-      parts.push(`[user attached files]\n${attached.join("\n")}\n[/files]`);
+      parts.push(
+        `${promptFragments.attachedHeader}\n${attached.join("\n")}\n${promptFragments.attachedFooter}`,
+      );
     }
     const userText = m.text ?? m.caption ?? "";
     if (userText) parts.push(userText);
@@ -597,12 +593,16 @@ export class TelegramBot {
           await api.sendDocument(chatId, file, { ...threadOpt });
         }
       } catch (err) {
-        const label = att.kind === "sticker" ? `sticker ${att.fileId.slice(0, 12)}…` : att.absPath.split("/").pop();
-        this.opts.cliLog(`failed to send ${label}: ${(err as Error)?.message ?? err}`);
+        const label =
+          att.kind === "sticker"
+            ? `sticker ${att.fileId.slice(0, 12)}…`
+            : att.absPath.split("/").pop() ?? "file";
+        const errMsg = (err as Error)?.message ?? String(err);
+        this.opts.cliLog(`failed to send ${label}: ${errMsg}`);
         try {
           await api.sendMessage(
             chatId,
-            `_⚠️ failed to send ${label}: ${(err as Error)?.message ?? "error"}_`,
+            streamerMarkers.attachmentSendFailureSuffix(label, errMsg),
             { parse_mode: "HTML", ...threadOpt },
           );
         } catch {

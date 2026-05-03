@@ -7,6 +7,13 @@ import { TelegramBot, type PiBridge, type UserMessageContent } from "./bot/Teleg
 import { StickerCache } from "./bot/StickerCache.js";
 import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
 import { assertInsideRoot, expandHome } from "./util/paths.js";
+import {
+  SYSTEM_PROMPT_SUFFIX,
+  TELEGRAM_PREFIX,
+  toolResults,
+  tools as toolPrompts,
+  userMessages,
+} from "./config/prompts.js";
 
 /**
  * Loose subset of @mariozechner/pi-coding-agent's ExtensionAPI that we use.
@@ -148,26 +155,7 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     }
   });
 
-  // Inject system-prompt suffix so the agent knows about the Telegram bridge
-  // and our tool. Without this, the agent only sees the tool name/description
-  // in its tool list — it doesn't understand the `[telegram chat=...]` message
-  // convention or that mentioning a path in plain text won't deliver the file.
-  const TELEGRAM_PREFIX = "[telegram";
-  const SYSTEM_PROMPT_SUFFIX = `
-
-Telegram bridge extension is active.
-- Messages forwarded from Telegram are prefixed with "${TELEGRAM_PREFIX} chat=<id> from=<user_id>]" on their first line.
-- Telegram messages may include local temp file paths under ~/.pi/agent/tmp/telegram/ for attached photos, audio files, voice messages, videos, and documents. Read those files when relevant.
-- "voice message (recorded by user)" and "audio file" are DIFFERENT in Telegram: voice = a microphone recording (Ogg/Opus, often informal), audio = an uploaded music/audio file. The user explicitly chose one or the other; treat them differently when responding.
-- To deliver a file to Telegram: call \`telegram_attach\` with the absolute local path. Auto-classified by extension: .jpg/.png/.webp/.gif → photo, .mp4/.mov → video, .ogg → voice message, .mp3/.m4a/.flac/.wav → audio file, anything else → document. Save artifacts to the current working directory or ~/.pi/agent/tmp/ before attaching (those are the allowed roots).
-- DO NOT assume mentioning a local file path in plain text will send it. Only \`telegram_attach\` actually delivers files.
-- Static stickers (.webp) sent by users arrive as image content you can see directly the FIRST time. Subsequent times the same sticker arrives, the image is omitted (you've already seen it) and only a stable \`sticker_id=<id>\` is shown — recall what it looked like from earlier in the conversation.
-- Video stickers and animated (Lottie) stickers arrive as emoji-only hints (you don't see the actual content).
-- DEFAULT REPLY TO A STICKER IS PLAIN TEXT. Do NOT echo stickers back automatically. \`telegram_send_sticker\` is reserved for the rare case the user EXPLICITLY asks you to send a sticker (e.g., "send me back the same sticker", "react with the sticker I just sent"). The presence of \`sticker_id=<id>\` in the prompt is informational — it does NOT mean you should re-send it.
-- You can react to the user's message with an emoji via \`telegram_react\` (e.g., 👀 to acknowledge a long-awaited message, 👍 for agreement, ❤️ for warmth). Use sparingly — a reaction is a non-verbal acknowledgement, NOT a substitute for a reply. Reactions fire immediately on tool-call. Pass an empty string to clear. Telegram only accepts emojis from its standard palette (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡); obscure or custom emojis are rejected.
-- The user can also react to YOUR messages — those arrive as a synthetic prompt like \`[user reacted to message <id> with 👀]\` or \`[user removed reaction from message <id> (was 👀)]\`. These are non-verbal signals (👀 = "noticed", 👍 = "ack", ❤️ = "thanks", 🤣 = "funny", etc.) — they are NOT a request for a reply.
-- DEFAULT BEHAVIOR FOR INCOMING REACTIONS IS SILENCE. Output EXACTLY \`[[skip]]\` (and nothing else) to stay silent — that suppresses any text reply. Reply with actual text ONLY when the reaction unambiguously invites one (e.g., 🤔 = confusion, 👎 = disagreement). When in doubt, prefer \`[[skip]]\` — over-replying to reactions is annoying.`;
-
+  // System-prompt suffix and TELEGRAM_PREFIX live in src/config/prompts.ts.
   // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
   const bridge: PiBridge = {
@@ -235,18 +223,9 @@ Telegram bridge extension is active.
   pi.registerTool({
     name: "telegram_attach",
     label: "Telegram Attach",
-    description:
-      "Queue one or more local files to be sent with the current Telegram reply. " +
-      "Files are auto-classified by extension: .jpg/.png/.webp/.gif → photo, " +
-      ".mp4/.mov → video, .ogg → voice, .mp3/.m4a/.flac/.wav → audio, anything else → document. " +
-      "Use this when the user asked for a file or you generated an artifact (image, audio, video, document) " +
-      "instead of just mentioning the path in text.",
-    promptSnippet: "Queue files to be sent with the current Telegram reply.",
-    promptGuidelines: [
-      "When handling a [telegram] message and the user asked for or you produced a file/image/audio/video, call telegram_attach with the absolute local path.",
-      "Send files explicitly via this tool — mentioning a path in plain text does NOT deliver the file to Telegram.",
-      "Allowed roots are the pi working directory and ~/.pi/agent/tmp/. Save artifacts there before attaching.",
-    ],
+    description: toolPrompts.attach.description,
+    promptSnippet: toolPrompts.attach.promptSnippet,
+    promptGuidelines: toolPrompts.attach.promptGuidelines,
     parameters: Type.Object({
       paths: Type.Array(Type.String({ description: "Absolute local file path" }), {
         minItems: 1,
@@ -255,16 +234,8 @@ Telegram bridge extension is active.
     }),
     async execute(_toolCallId: string, params: { paths: string[] }) {
       if (!bot.isInTurn()) {
-        // Not in a Telegram-originated turn (e.g., user is typing directly in pi-CLI).
-        // Return a soft tool-result instead of throwing — the agent sees the message
-        // and adapts; the user doesn't see a scary error popup.
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: "telegram_attach is only available while replying to a Telegram message. The current turn is not from Telegram, so no file was queued. Continue normally.",
-            },
-          ],
+          content: [{ type: "text" as const, text: toolResults.attachNotInTurn }],
           details: { added: [], errors: ["not in telegram turn"] },
         };
       }
@@ -300,8 +271,8 @@ Telegram bridge extension is active.
         }
       }
       const lines: string[] = [];
-      if (added.length > 0) lines.push(`Queued ${added.length} attachment(s) for delivery.`);
-      if (errors.length > 0) lines.push(`Failed: ${errors.join("; ")}`);
+      if (added.length > 0) lines.push(toolResults.attachQueued(added.length));
+      if (errors.length > 0) lines.push(toolResults.attachFailures(errors));
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: { added, errors },
@@ -315,19 +286,9 @@ Telegram bridge extension is active.
   pi.registerTool({
     name: "telegram_send_sticker",
     label: "Telegram Send Sticker",
-    description:
-      "RARE-USE: send a sticker to the current Telegram chat. ONLY use this tool when the user " +
-      "EXPLICITLY asks for a sticker reply (e.g., 'send me that sticker back', 'reply with the same sticker'). " +
-      "Default reply to any message — including a sticker — is plain text. Do NOT auto-echo stickers. " +
-      "The sticker must have been previously sent by the user (so it lives in our cache); " +
-      "pass the `sticker_id=<id>` from a prior `[user sent sticker (...)]` marker.",
-    promptSnippet: "Send a sticker — only when the user explicitly asks for one.",
-    promptGuidelines: [
-      "Default reply to a sticker message is normal text. Do NOT echo the sticker back unless the user explicitly asks.",
-      "Pass the `sticker_id` shown in earlier `[user sent sticker (...)]` markers, NOT the emoji.",
-      "Only stickers from the cache work — you can't make up new sticker_ids.",
-      "Sticker is queued and sent after your text reply (same flow as telegram_attach).",
-    ],
+    description: toolPrompts.sendSticker.description,
+    promptSnippet: toolPrompts.sendSticker.promptSnippet,
+    promptGuidelines: toolPrompts.sendSticker.promptGuidelines,
     parameters: Type.Object({
       stickerId: Type.String({
         description: "The sticker_id from a prior [user sent sticker ... sticker_id=<id> ...] marker.",
@@ -336,35 +297,20 @@ Telegram bridge extension is active.
     async execute(_toolCallId: string, params: { stickerId: string }) {
       if (!bot.isInTurn()) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: "telegram_send_sticker is only available while replying to a Telegram message.",
-            },
-          ],
+          content: [{ type: "text" as const, text: toolResults.stickerNotInTurn }],
           details: { ok: false, reason: "not-in-telegram-turn" },
         };
       }
       const cached = await stickerCache.get(params.stickerId);
       if (!cached) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No sticker cached with sticker_id="${params.stickerId}". The user must have sent that sticker earlier for it to be available.`,
-            },
-          ],
+          content: [{ type: "text" as const, text: toolResults.stickerNotInCache(params.stickerId) }],
           details: { ok: false, reason: "not-in-cache" },
         };
       }
       bot.queueSticker(cached.fileId);
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: `Queued sticker (emoji: ${cached.emoji ?? "?"}) for delivery.`,
-          },
-        ],
+        content: [{ type: "text" as const, text: toolResults.stickerQueued(cached.emoji) }],
         details: { ok: true, fileId: cached.fileId, emoji: cached.emoji },
       };
     },
@@ -376,18 +322,9 @@ Telegram bridge extension is active.
   pi.registerTool({
     name: "telegram_react",
     label: "Telegram React",
-    description:
-      "Set an emoji reaction on a Telegram message. Common uses: 👀 to acknowledge you've seen " +
-      "a long-awaited message, 👍 for agreement, ❤️ for warmth. Fires immediately (not queued). " +
-      "Pass empty string to clear any prior reaction. Telegram only accepts emojis from its " +
-      "standard reaction palette (e.g., 👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 👀 🤝 🫡); " +
-      "obscure or custom emojis are rejected with a 400.",
-    promptSnippet: "Set an emoji reaction on the user's message.",
-    promptGuidelines: [
-      "Default target is the user's incoming message that triggered the current turn — usually you don't need to pass messageId.",
-      "Use sparingly: a reaction is a non-verbal acknowledgement, not a substitute for a reply.",
-      "If a reaction is rejected (invalid emoji), the tool returns an error in `details`; pick another emoji from the palette and retry.",
-    ],
+    description: toolPrompts.react.description,
+    promptSnippet: toolPrompts.react.promptSnippet,
+    promptGuidelines: toolPrompts.react.promptGuidelines,
     parameters: Type.Object({
       emoji: Type.String({
         description:
@@ -403,12 +340,7 @@ Telegram bridge extension is active.
     async execute(_toolCallId: string, params: { emoji: string; messageId?: number }) {
       if (!bot.isInTurn()) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: "telegram_react is only available while replying to a Telegram message.",
-            },
-          ],
+          content: [{ type: "text" as const, text: toolResults.reactNotInTurn }],
           details: { ok: false, reason: "not-in-telegram-turn" },
         };
       }
@@ -418,7 +350,7 @@ Telegram bridge extension is active.
           content: [
             {
               type: "text" as const,
-              text: params.emoji ? `Reacted with ${params.emoji}.` : "Cleared reaction.",
+              text: params.emoji ? toolResults.reactedWith(params.emoji) : toolResults.reactionCleared,
             },
           ],
           details: { ok: true, emoji: params.emoji },
@@ -426,19 +358,14 @@ Telegram bridge extension is active.
       } catch (err) {
         const msg = (err as Error)?.message ?? String(err);
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Reaction failed: ${msg}`,
-            },
-          ],
+          content: [{ type: "text" as const, text: toolResults.reactionFailed(msg) }],
           details: { ok: false, error: msg },
         };
       }
     },
   });
 
-  cliLog("Extension loaded. Use /telegram-connect to start.");
+  cliLog(userMessages.extensionLoaded);
 
   return { name: "pi-telegram-connect", version: "0.1.0" };
 }

@@ -1,4 +1,5 @@
 import type { ChatId, ThreadId, MessageId } from "../types.js";
+import { streamerMarkers } from "../config/prompts.js";
 import { mdToHtml, htmlToPlain } from "./Formatter.js";
 
 export interface TelegramSendCalls {
@@ -138,7 +139,7 @@ export class Streamer {
   private renderCurrent(): string {
     let s = this.bodyBuffer.slice(this.committedOffset);
     if (this.toolActive) {
-      s += `\n\n_⚙️ running: ${this.toolActive.name}(${this.toolActive.argsSummary})_`;
+      s += streamerMarkers.toolIndicator(this.toolActive.name, this.toolActive.argsSummary);
     }
     return s;
   }
@@ -317,7 +318,7 @@ export class Streamer {
       return;
     }
     this.toolActive = null;
-    this.bodyBuffer += "\n\n_⏹ stopped_";
+    this.bodyBuffer += streamerMarkers.stopped;
     await this.flush();
     this.state = "DONE";
   }
@@ -330,7 +331,7 @@ export class Streamer {
     }
     this.toolActive = null;
     const safe = message.replace(/[\r\n]+/g, " ").slice(0, 200);
-    this.bodyBuffer += `\n\n_⚠️ error: ${safe}_`;
+    this.bodyBuffer += streamerMarkers.error(safe);
     await this.flush();
     this.state = "DONE";
   }
