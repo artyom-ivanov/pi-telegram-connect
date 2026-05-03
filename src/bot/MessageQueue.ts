@@ -11,7 +11,6 @@ interface Lane<T> {
   items: T[];
   running: boolean;
   abort: AbortController;
-  idleSince: number;
 }
 
 export class MessageQueue<T> {
@@ -22,7 +21,7 @@ export class MessageQueue<T> {
   enqueue(key: SessionKey, item: T): { ok: true } | { ok: false; reason: "rejected" } {
     let lane = this.lanes.get(key);
     if (!lane) {
-      lane = { items: [], running: false, abort: new AbortController(), idleSince: Date.now() };
+      lane = { items: [], running: false, abort: new AbortController() };
       this.lanes.set(key, lane);
     }
     if (lane.items.length >= this.opts.maxDepth) {
@@ -59,7 +58,6 @@ export class MessageQueue<T> {
       }
     } finally {
       lane.running = false;
-      lane.idleSince = Date.now();
     }
   }
 
@@ -80,21 +78,8 @@ export class MessageQueue<T> {
     }
   }
 
-  /** Drop empty, idle lanes older than ttlMs. */
-  sweepIdle(ttlMs: number): void {
-    const now = Date.now();
-    for (const [key, lane] of this.lanes) {
-      if (!lane.running && lane.items.length === 0 && now - lane.idleSince > ttlMs) {
-        this.lanes.delete(key);
-      }
-    }
-  }
-
+  /** Pending items count for the given key. */
   size(key: SessionKey): number {
     return this.lanes.get(key)?.items.length ?? 0;
-  }
-
-  isRunning(key: SessionKey): boolean {
-    return this.lanes.get(key)?.running ?? false;
   }
 }

@@ -1,5 +1,6 @@
 import type { ConfigStore } from "../config/ConfigStore.js";
 import type { TelegramBot } from "../bot/TelegramBot.js";
+import type { StickerCache } from "../bot/StickerCache.js";
 import { PairingFlow } from "../bot/PairingFlow.js";
 
 /**
@@ -19,6 +20,7 @@ export interface CliRegistration {
 export interface CliDeps {
   configStore: ConfigStore;
   bot: TelegramBot;
+  stickerCache: StickerCache;
 }
 
 const splitArgs = (s: string): string[] =>
@@ -28,7 +30,7 @@ const splitArgs = (s: string): string[] =>
     .filter((x) => x.length > 0);
 
 export function buildCliCommands(deps: CliDeps): CliRegistration[] {
-  const { configStore, bot } = deps;
+  const { configStore, bot, stickerCache } = deps;
 
   return [
     {
@@ -87,6 +89,14 @@ export function buildCliCommands(deps: CliDeps): CliRegistration[] {
         ctx.ui.notify(
           [`Bot running: ${bot.isRunning()}`, `Owner: ${cfg.owner ?? "(not paired)"}`].join("\n"),
         );
+      },
+    },
+    {
+      name: "telegram-reset-stickers-cache",
+      description: "Wipe the cached sticker_id → file_id map (re-learns next time user sends each sticker).",
+      handler: async (_raw, ctx) => {
+        await stickerCache.reset();
+        ctx.ui.notify("Sticker cache cleared.");
       },
     },
   ];

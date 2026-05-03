@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { Bot, type Context, InputFile } from "grammy";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import type { ConfigStore } from "../config/ConfigStore.js";
@@ -5,6 +6,7 @@ import { evaluateAccess } from "./AccessControl.js";
 import { MessageQueue } from "./MessageQueue.js";
 import { PairingFlow } from "./PairingFlow.js";
 import { Streamer } from "./Streamer.js";
+import type { StickerCache } from "./StickerCache.js";
 import { resolveDestPath, downloadToPath } from "./MediaIngest.js";
 import { TelegramRateLimiter } from "../util/ratelimit.js";
 import type { Config } from "../config/schema.js";
@@ -45,10 +47,16 @@ export interface PiBridge {
 
 export interface TelegramBotOptions {
   configStore: ConfigStore;
+  stickerCache: StickerCache;
   tmpDir: string;
   cliLog: (msg: string) => void;
   pi: PiBridge;
 }
+
+/** A queued outbound delivery: either a local file (auto-classified) or a sticker by file_id. */
+export type Attachment =
+  | { kind: "file"; absPath: string }
+  | { kind: "sticker"; fileId: string };
 
 interface QueueItem {
   ctx: Context;
@@ -67,9 +75,9 @@ export class TelegramBot {
   private activeStreamer: Streamer | null = null;
   /** Resolves when the active turn finishes. Set by runTurn, fulfilled by onTurnEnd. */
   private turnEndResolver: (() => void) | null = null;
-  /** Files queued by the agent (via telegram_attach tool) during the current turn.
-   *  Sent to the active chat after the streamer finalizes. */
-  private currentTurnAttachments: string[] = [];
+  /** Things queued by the agent (via telegram_attach / telegram_send_sticker) during
+   *  the current turn. Sent to the active chat after the streamer finalizes. */
+  private currentTurnAttachments: Attachment[] = [];
   /** Active turn context — set in runTurn so tools can target the right chat. */
   private activeTurn: { chatId: number; threadId: number; replyToMessageId?: number } | null = null;
   /** Abort thunk for the currently-running pi agent loop, captured via agent_start. Cleared on turn_end. */
@@ -92,7 +100,7 @@ export class TelegramBot {
     return this.activeTurn !== null;
   }
 
-  /** Queue a file path to be sent to the active chat after the current turn finalizes. */
+  /** Queue a local file path to be sent to the active chat after the current turn finalizes. */
   queueAttachment(absPath: string): void {
     if (!this.activeTurn) {
       throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
@@ -100,7 +108,18 @@ export class TelegramBot {
     if (this.currentTurnAttachments.length >= 10) {
       throw new Error("attachment limit reached (10 per turn)");
     }
-    this.currentTurnAttachments.push(absPath);
+    this.currentTurnAttachments.push({ kind: "file", absPath });
+  }
+
+  /** Queue a sticker (by Bot API file_id) to be sent after the current turn finalizes. */
+  queueSticker(fileId: string): void {
+    if (!this.activeTurn) {
+      throw new Error("telegram_send_sticker can only be used while replying to an active Telegram turn");
+    }
+    if (this.currentTurnAttachments.length >= 10) {
+      throw new Error("attachment limit reached (10 per turn)");
+    }
+    this.currentTurnAttachments.push({ kind: "sticker", fileId });
   }
 
   async start(token: string): Promise<void> {
@@ -303,12 +322,19 @@ export class TelegramBot {
       }
     }
     if (m.voice) {
+      // Voice = recorded-via-Telegram Ogg/Opus message. ALWAYS distinct from m.audio.
       const dest = await downloadFile(m.voice.file_id, m.voice.file_unique_id, "voice.ogg");
-      if (dest) attached.push(`- voice (${m.voice.duration}s): ${dest}`);
+      if (dest) attached.push(`- voice message (recorded by user, ${m.voice.duration}s): ${dest}`);
     }
     if (m.audio) {
-      const dest = await downloadFile(m.audio.file_id, m.audio.file_unique_id, m.audio.file_name ?? "audio");
-      if (dest) attached.push(`- audio (${m.audio.duration}s): ${dest}`);
+      // Audio = uploaded audio file (mp3/m4a/flac/wav/ogg). NOT a voice message.
+      const name = m.audio.file_name ?? "audio";
+      const title = m.audio.title ? ` "${m.audio.title}"` : "";
+      const performer = m.audio.performer ? ` by ${m.audio.performer}` : "";
+      const dest = await downloadFile(m.audio.file_id, m.audio.file_unique_id, name);
+      if (dest) {
+        attached.push(`- audio file${title}${performer} (${m.audio.duration}s): ${dest}`);
+      }
     }
     if (m.video) {
       const dest = await downloadFile(m.video.file_id, m.video.file_unique_id, m.video.file_name ?? "video.mp4");
@@ -322,33 +348,48 @@ export class TelegramBot {
       const sk = m.sticker;
       const kind: "static" | "video" | "lottie" =
         sk.is_animated ? "lottie" : sk.is_video ? "video" : "static";
+      const emoji = sk.emoji ?? "🎴";
       if (kind === "static") {
-        // Static stickers are .webp images. Send to the agent as image content
-        // so its vision capability sees the sticker directly. Also keep an emoji
-        // hint in text for context.
-        const dest = await downloadFile(sk.file_id, sk.file_unique_id, "sticker.webp");
-        let injected = false;
-        if (dest) {
-          try {
-            const { readFile } = await import("node:fs/promises");
-            const buf = await readFile(dest);
-            images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/webp" });
-            attached.push(`[user sent a static sticker (emoji hint: ${sk.emoji ?? "🎴"})]`);
-            injected = true;
-          } catch {
-            // fall through to text-only
+        // Cache lookup BEFORE any work — if we've seen this sticker before we don't
+        // re-download the .webp and don't re-pass it to the agent's vision context;
+        // we just inject a stable sticker_id so the agent can echo it back.
+        const cached = await this.opts.stickerCache.get(sk.file_unique_id);
+        if (cached) {
+          attached.push(
+            `[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id}, seen-before)]`,
+          );
+        } else {
+          const dest = await downloadFile(sk.file_id, sk.file_unique_id, "sticker.webp");
+          let injected = false;
+          if (dest) {
+            try {
+              const { readFile } = await import("node:fs/promises");
+              const buf = await readFile(dest);
+              images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/webp" });
+              attached.push(
+                `[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id}, first-time)]`,
+              );
+              // Save AFTER successful image ingest so a download-failure doesn't pollute the cache.
+              await this.opts.stickerCache.set(sk.file_unique_id, {
+                fileId: sk.file_id,
+                emoji: sk.emoji ?? null,
+                seenAt: Date.now(),
+              });
+              injected = true;
+            } catch {
+              // fall through to text-only
+            }
+          }
+          if (!injected) {
+            attached.push(`[user sent sticker (emoji: ${emoji}, sticker_id=${sk.file_unique_id})]`);
           }
         }
-        if (!injected) {
-          attached.push(`[user sent sticker (emoji: ${sk.emoji ?? "🎴"})]`);
-        }
       } else if (kind === "video") {
-        // Video stickers: don't ship the .webm to the agent (most LLMs don't accept video).
-        // We could ffmpeg-extract a frame, but that's StickerCache's job; for V1, emoji-only.
-        attached.push(`[user sent a video sticker (emoji: ${sk.emoji ?? "🎴"})]`);
+        // Video stickers — emoji only. Don't download .webm, don't pass to the agent.
+        attached.push(`[user sent a video sticker (emoji: ${emoji})]`);
       } else {
-        // Lottie animated sticker — emoji-only.
-        attached.push(`[user sent an animated sticker (emoji: ${sk.emoji ?? "🎴"})]`);
+        // Lottie animated sticker — emoji only.
+        attached.push(`[user sent an animated sticker (emoji: ${emoji})]`);
       }
     }
 
@@ -462,19 +503,32 @@ export class TelegramBot {
     const api = ctx.api as any;
     const threadOpt =
       threadId !== undefined && threadId > 0 ? { message_thread_id: threadId } : {};
-    for (const absPath of this.currentTurnAttachments) {
+    const cfg = await this.opts.configStore.load();
+    const maxOutBytes = cfg.limits.maxOutgoingFileMb * 1024 * 1024;
+    for (const att of this.currentTurnAttachments) {
       try {
         await this.rateLimiter.wait(chatId);
-        const lower = absPath.toLowerCase();
+        if (att.kind === "sticker") {
+          // Sticker by file_id — Bot API accepts the string directly. No size check
+          // (Telegram already stores it; we're just referencing).
+          await api.sendSticker(chatId, att.fileId, { ...threadOpt });
+          continue;
+        }
+        // file kind — verify size first (Bot API send limits: 50 MB document, 10 MB photo).
+        const st = await stat(att.absPath);
+        if (st.size > maxOutBytes) {
+          throw new Error(
+            `file_too_large: ${(st.size / 1024 / 1024).toFixed(1)} MB exceeds maxOutgoingFileMb=${cfg.limits.maxOutgoingFileMb}`,
+          );
+        }
+        const lower = att.absPath.toLowerCase();
         const isImage = /\.(jpe?g|png|webp|gif)$/i.test(lower);
         const isVideo = /\.(mp4|mov|m4v)$/i.test(lower);
         const isVoice = /\.ogg$/i.test(lower);
         const isAudio = /\.(mp3|m4a|flac|wav)$/i.test(lower);
         // grammy expects an `InputFile` (or string URL/file_id), NOT a {source}
-        // object — that's the node-telegram-bot-api convention. Without InputFile
-        // the path is stringified as `[object Object]` and Telegram bounces with
-        // "invalid file HTTP URL".
-        const file = new InputFile(absPath);
+        // object — that's the node-telegram-bot-api convention.
+        const file = new InputFile(att.absPath);
         if (isImage) {
           await api.sendPhoto(chatId, file, { ...threadOpt });
         } else if (isVideo) {
@@ -487,12 +541,12 @@ export class TelegramBot {
           await api.sendDocument(chatId, file, { ...threadOpt });
         }
       } catch (err) {
-        this.opts.cliLog(`failed to send attachment ${absPath}: ${(err as Error)?.message ?? err}`);
-        // Surface to user (non-blocking, fire-and-forget):
+        const label = att.kind === "sticker" ? `sticker ${att.fileId.slice(0, 12)}…` : att.absPath.split("/").pop();
+        this.opts.cliLog(`failed to send ${label}: ${(err as Error)?.message ?? err}`);
         try {
           await api.sendMessage(
             chatId,
-            `_⚠️ failed to send file ${absPath.split("/").pop()}: ${(err as Error)?.message ?? "error"}_`,
+            `_⚠️ failed to send ${label}: ${(err as Error)?.message ?? "error"}_`,
             { parse_mode: "HTML", ...threadOpt },
           );
         } catch {

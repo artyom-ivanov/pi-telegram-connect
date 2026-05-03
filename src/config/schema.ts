@@ -22,7 +22,11 @@ export const ConfigSchema = Type.Object({
   owner: Type.Union([Type.Number(), Type.Null()]),
   pendingPairCode: Type.Union([PendingPairCodeSchema, Type.Null()]),
   limits: Type.Object({
+    /** Cloud Bot API getFile is hard-capped at 20 MB. Larger inbound files are skipped. */
     maxIncomingFileMb: Type.Number(),
+    /** Cloud Bot API send-document upload limit is 50 MB; photo is 10 MB; video varies. */
+    maxOutgoingFileMb: Type.Number(),
+    /** Per-chat FIFO depth (single-user single-chat: rarely matters). */
     maxQueueDepth: Type.Number(),
   }),
 });
@@ -36,6 +40,7 @@ export const DEFAULT_CONFIG: Config = {
   pendingPairCode: null,
   limits: {
     maxIncomingFileMb: 20,
+    maxOutgoingFileMb: 50,
     maxQueueDepth: 32,
   },
 };

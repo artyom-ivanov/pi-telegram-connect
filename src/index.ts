@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import { Type } from "@sinclair/typebox";
 import { ConfigStore } from "./config/ConfigStore.js";
 import { TelegramBot, type PiBridge, type UserMessageContent } from "./bot/TelegramBot.js";
+import { StickerCache } from "./bot/StickerCache.js";
 import { buildCliCommands, type CommandCtx } from "./commands/cli.js";
 import { assertInsideRoot, expandHome } from "./util/paths.js";
 
@@ -53,9 +54,11 @@ export interface ExtensionAPILoose {
 export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string; version: string } {
   const home = homedir();
   const configPath = join(home, ".pi", "agent", "telegram-connect.json");
+  const stickerCachePath = join(home, ".pi", "agent", "telegram-connect-stickers.json");
   const tmpDir = join(home, ".pi", "agent", "tmp", "telegram");
 
   const configStore = new ConfigStore(configPath);
+  const stickerCache = new StickerCache(stickerCachePath);
 
   const cliLog = (msg: string) => {
     // pi-CLI loggers vary; the safest place is process.stderr so it shows in pi's debug output.
@@ -154,12 +157,13 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
 
 Telegram bridge extension is active.
 - Messages forwarded from Telegram are prefixed with "${TELEGRAM_PREFIX} chat=<id> from=<user_id>]" on their first line.
-- Telegram messages may include local temp file paths under ~/.pi/agent/tmp/telegram/ for attached photos, voice, audio, video, documents, and stickers. Read those files when they're relevant.
-- If a Telegram user asked for a file, image, voice, video, or you generated an artifact (chart, screenshot, audio, document, etc.), call the \`telegram_attach\` tool with the absolute local path. The bot will deliver each file with your reply (auto-classified by extension: photo / voice / video / audio / document).
-- DO NOT assume mentioning a local file path in plain text will send it to Telegram. Only \`telegram_attach\` actually delivers files.
-- For images you generated, save them under the current working directory or ~/.pi/agent/tmp/ before attaching — those are the allowed roots.
-- Static stickers (.webp) sent by users arrive as image content you can see directly. Video stickers (.webm) and Lottie stickers (.tgs) arrive as text-only emoji hints.
-- The current Telegram message context (chat, thread, originator) is implicit — your reply goes to whichever chat just messaged you. There is no per-chat session: all Telegram chats share this pi session. If you see messages from different chat ids, treat them as parallel conversations and stay focused on the most recent one.`;
+- Telegram messages may include local temp file paths under ~/.pi/agent/tmp/telegram/ for attached photos, audio files, voice messages, videos, and documents. Read those files when relevant.
+- "voice message (recorded by user)" and "audio file" are DIFFERENT in Telegram: voice = a microphone recording (Ogg/Opus, often informal), audio = an uploaded music/audio file. The user explicitly chose one or the other; treat them differently when responding.
+- To deliver a file to Telegram: call \`telegram_attach\` with the absolute local path. Auto-classified by extension: .jpg/.png/.webp/.gif → photo, .mp4/.mov → video, .ogg → voice message, .mp3/.m4a/.flac/.wav → audio file, anything else → document. Save artifacts to the current working directory or ~/.pi/agent/tmp/ before attaching (those are the allowed roots).
+- DO NOT assume mentioning a local file path in plain text will send it. Only \`telegram_attach\` actually delivers files.
+- Static stickers (.webp) sent by users arrive as image content you can see directly the FIRST time. Subsequent times the same sticker arrives, the image is omitted (you've already seen it) and only a stable \`sticker_id=<id>\` is shown — recall what it looked like from earlier in the conversation.
+- Video stickers and animated (Lottie) stickers arrive as emoji-only hints (you don't see the actual content).
+- To send a sticker the user previously sent (echo a sticker), call \`telegram_send_sticker\` with the \`sticker_id\` you saw in the prompt. This re-sends the same sticker without re-uploading.`;
 
   // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
@@ -193,6 +197,7 @@ Telegram bridge extension is active.
 
   const bot = new TelegramBot({
     configStore,
+    stickerCache,
     tmpDir,
     cliLog,
     pi: bridge,
@@ -211,7 +216,7 @@ Telegram bridge extension is active.
     return { systemPrompt: String(event?.systemPrompt ?? "") + suffix };
   });
 
-  const cmds = buildCliCommands({ configStore, bot });
+  const cmds = buildCliCommands({ configStore, bot, stickerCache });
   for (const c of cmds) {
     pi.registerCommand(c.name, { description: c.description, handler: c.handler });
   }
@@ -297,6 +302,64 @@ Telegram bridge extension is active.
       return {
         content: [{ type: "text", text: lines.join("\n") }],
         details: { added, errors },
+      };
+    },
+  });
+
+  // Register the sticker echo tool. Stickers the user has previously sent are cached
+  // by their `sticker_id` (= file_unique_id). The agent recalls a sticker_id from the
+  // prompt and asks us to send the cached sticker back via Bot API's sendSticker.
+  pi.registerTool({
+    name: "telegram_send_sticker",
+    label: "Telegram Send Sticker",
+    description:
+      "Send a sticker to the current Telegram chat. The sticker must have been previously " +
+      "sent by the user (so it lives in our cache). Look for `sticker_id=<id>` markers in " +
+      "the conversation history — those are the values you pass here.",
+    promptSnippet: "Echo a previously-seen sticker back to Telegram.",
+    promptGuidelines: [
+      "Pass the `sticker_id` shown in earlier `[user sent sticker (...)]` markers, NOT the emoji.",
+      "Only stickers from the cache work — you can't make up new sticker_ids.",
+      "Sticker is queued and sent after your text reply (same flow as telegram_attach).",
+    ],
+    parameters: Type.Object({
+      stickerId: Type.String({
+        description: "The sticker_id from a prior [user sent sticker ... sticker_id=<id> ...] marker.",
+      }),
+    }),
+    async execute(_toolCallId: string, params: { stickerId: string }) {
+      if (!bot.isInTurn()) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "telegram_send_sticker is only available while replying to a Telegram message.",
+            },
+          ],
+          details: { ok: false, reason: "not-in-telegram-turn" },
+        };
+      }
+      const cached = await stickerCache.get(params.stickerId);
+      if (!cached) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No sticker cached with sticker_id="${params.stickerId}". The user must have sent that sticker earlier for it to be available.`,
+            },
+          ],
+          details: { ok: false, reason: "not-in-cache" },
+        };
+      }
+      bot.queueSticker(cached.fileId);
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Queued sticker (emoji: ${cached.emoji ?? "?"}) for delivery.`,
+          },
+        ],
+        details: { ok: true, fileId: cached.fileId, emoji: cached.emoji },
       };
     },
   });

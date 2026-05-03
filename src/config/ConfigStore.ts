@@ -68,6 +68,18 @@ export class ConfigStore {
         `pi-telegram-connect: unknown config schema version ${String(versionField)} in ${this.path}; expected 2`,
       );
     }
+    // Forward-compat fill-in: when we add new optional limits in later patches,
+    // existing v2 configs lack them. Rather than backup-and-reset (losing botToken
+    // and owner), fill in defaults for any missing limits before validation.
+    const p = parsed as { limits?: Record<string, unknown> };
+    if (p.limits && typeof p.limits === "object") {
+      const defaults = DEFAULT_CONFIG.limits as unknown as Record<string, unknown>;
+      for (const k of Object.keys(defaults)) {
+        if (typeof p.limits[k] !== "number") p.limits[k] = defaults[k];
+      }
+    } else {
+      (parsed as { limits: unknown }).limits = structuredClone(DEFAULT_CONFIG.limits);
+    }
     if (!Value.Check(ConfigSchema, parsed)) {
       const backup = `${this.path}.broken.${Date.now()}`;
       await rename(this.path, backup).catch(() => undefined);

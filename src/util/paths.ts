@@ -1,5 +1,5 @@
 import { resolve, sep, basename } from "node:path";
-import { realpath, open, type FileHandle } from "node:fs/promises";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 
 export function expandHome(p: string): string {
@@ -47,28 +47,4 @@ export async function assertInsideRoot(
     throw new Error(`path_outside_sandbox: ${childAbs} not under ${rootAbs}`);
   }
   return childAbs;
-}
-
-/** Open a file for reading, validate size, return fh + size for TOCTOU-safe upload. */
-export async function openForUpload(absPath: string, maxBytes: number): Promise<{ fh: FileHandle; size: number }> {
-  const fh = await open(absPath, "r");
-  try {
-    const st = await fh.stat();
-    if (!st.isFile()) {
-      throw new Error("unsupported_type: not a regular file");
-    }
-    if (st.size > maxBytes) {
-      throw new Error("file_too_large");
-    }
-    return { fh, size: st.size };
-  } catch (err) {
-    await fh.close().catch(() => undefined);
-    throw err;
-  }
-}
-
-export function truncateCaption(caption: string | undefined): string | undefined {
-  if (caption === undefined) return undefined;
-  if (caption.length <= 1024) return caption;
-  return caption.slice(0, 1021) + "...";
 }
