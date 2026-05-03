@@ -163,8 +163,8 @@ Telegram bridge extension is active.
 - DO NOT assume mentioning a local file path in plain text will send it. Only \`telegram_attach\` actually delivers files.
 - Static stickers (.webp) sent by users arrive as image content you can see directly the FIRST time. Subsequent times the same sticker arrives, the image is omitted (you've already seen it) and only a stable \`sticker_id=<id>\` is shown — recall what it looked like from earlier in the conversation.
 - Video stickers and animated (Lottie) stickers arrive as emoji-only hints (you don't see the actual content).
-- To send a sticker the user previously sent (echo a sticker), call \`telegram_send_sticker\` with the \`sticker_id\` you saw in the prompt. This re-sends the same sticker without re-uploading.
-- You can react to the user's message with an emoji via \`telegram_react\` (e.g., 👀 to acknowledge a long-awaited message, 👍 for agreement, ❤️ for warmth, 🔥/🤔/😢/etc.). Reactions fire immediately on tool-call (not queued with the rest of the reply). Pass an empty string to clear any reaction. Telegram only accepts a fixed set of emojis from its standard reaction palette — common ones (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡) work; obscure or custom emojis will be rejected.`;
+- DEFAULT REPLY TO A STICKER IS PLAIN TEXT. Do NOT echo stickers back automatically. \`telegram_send_sticker\` is reserved for the rare case the user EXPLICITLY asks you to send a sticker (e.g., "send me back the same sticker", "react with the sticker I just sent"). The presence of \`sticker_id=<id>\` in the prompt is informational — it does NOT mean you should re-send it.
+- You can react to the user's message with an emoji via \`telegram_react\` (e.g., 👀 to acknowledge a long-awaited message, 👍 for agreement, ❤️ for warmth). Use sparingly — a reaction is a non-verbal acknowledgement, NOT a substitute for a reply. Reactions fire immediately on tool-call. Pass an empty string to clear. Telegram only accepts emojis from its standard palette (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡); obscure or custom emojis are rejected.`;
 
   // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
@@ -314,11 +314,14 @@ Telegram bridge extension is active.
     name: "telegram_send_sticker",
     label: "Telegram Send Sticker",
     description:
-      "Send a sticker to the current Telegram chat. The sticker must have been previously " +
-      "sent by the user (so it lives in our cache). Look for `sticker_id=<id>` markers in " +
-      "the conversation history — those are the values you pass here.",
-    promptSnippet: "Echo a previously-seen sticker back to Telegram.",
+      "RARE-USE: send a sticker to the current Telegram chat. ONLY use this tool when the user " +
+      "EXPLICITLY asks for a sticker reply (e.g., 'send me that sticker back', 'reply with the same sticker'). " +
+      "Default reply to any message — including a sticker — is plain text. Do NOT auto-echo stickers. " +
+      "The sticker must have been previously sent by the user (so it lives in our cache); " +
+      "pass the `sticker_id=<id>` from a prior `[user sent sticker (...)]` marker.",
+    promptSnippet: "Send a sticker — only when the user explicitly asks for one.",
     promptGuidelines: [
+      "Default reply to a sticker message is normal text. Do NOT echo the sticker back unless the user explicitly asks.",
       "Pass the `sticker_id` shown in earlier `[user sent sticker (...)]` markers, NOT the emoji.",
       "Only stickers from the cache work — you can't make up new sticker_ids.",
       "Sticker is queued and sent after your text reply (same flow as telegram_attach).",
