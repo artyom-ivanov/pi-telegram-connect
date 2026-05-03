@@ -8,7 +8,7 @@ Initial public release. Single-user, DM-only Telegram bridge for the Pi coding a
 
 ### Features
 - Real-time streaming of agent replies via `editMessageText` (3 s periodic throttle).
-- "Thinking…" header shown above the streamed message during the pre-reply phase, listing tool calls (`⚙️` running → `✅` done / `🚫` error). Header disappears once the agent emits text. Optional `showToolFooter` config flag keeps the call list as a footer in the final message.
+- "Working..." header shown above the streamed message during the pre-reply phase, listing tool calls (`⚙️` running → `✅` done / `🚫` error). Header disappears once the agent emits text. Optional `showToolFooter` config flag keeps the call list as a footer in the final message.
 - Markdown reply body rendered as Telegram HTML (with plaintext fallback on parse errors).
 - Long-message split at safe boundaries (4096-char Telegram limit).
 - Owner pairing via 6-character alphanumeric code (5-attempt cap, constant-time compare, 5-min validity).

@@ -1,4 +1,3 @@
-/** Simple token bucket: refills `ratePerSec` tokens per second, capped at `burst`. */
 export class TokenBucket {
   private tokens: number;
   private lastRefill = Date.now();
@@ -14,7 +13,6 @@ export class TokenBucket {
     this.lastRefill = now;
   }
 
-  /** Wait until a token is available, then consume it. */
   async consume(): Promise<void> {
     for (;;) {
       this.refill();
@@ -29,7 +27,6 @@ export class TokenBucket {
   }
 }
 
-/** Per-chat (1/sec each, burst 3) + global (25/sec, burst 30) combined limiter. */
 export class TelegramRateLimiter {
   private global = new TokenBucket(25, 30);
   private perChat = new Map<number, TokenBucket>();

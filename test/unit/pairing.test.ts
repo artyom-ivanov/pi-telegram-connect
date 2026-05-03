@@ -34,7 +34,7 @@ describe("PairingFlow", () => {
     expect(cfg.pendingPairCode?.attempts).toBe(0);
   });
 
-  it("matches correct code → sets owner, flips dm policy to allowlist, clears pending code", async () => {
+  it("matches correct code → sets owner and clears pending code", async () => {
     const { store } = await freshStore(dir);
     const flow = new PairingFlow(store);
     const code = await flow.startPairing();
@@ -82,7 +82,7 @@ describe("PairingFlow", () => {
     expect(after.pendingPairCode).toBeNull();
   });
 
-  it("explicitOwner skips pairing entirely, flips dm to allowlist, no code generated", async () => {
+  it("explicitOwner skips pairing entirely and does not generate a code", async () => {
     const { store } = await freshStore(dir);
     const flow = new PairingFlow(store);
     await flow.setExplicitOwner(98765);

@@ -16,19 +16,12 @@ import { expandHome } from "../util/paths.js";
 
 type RunState = "starting" | "running" | "draining" | "stopped";
 
-/** Multimedia message content shape compatible with pi.sendUserMessage. */
 export type UserMessageContent =
   | { type: "text"; text: string }
   | { type: "image"; data: string; mimeType: string };
 
-/**
- * Pi-side hooks the bot needs from the extension entry. The entry wires these,
- * delegating to pi.sendUserMessage / pi.on via captured `pi: ExtensionAPI`.
- */
 export interface PiBridge {
-  /** Pi accepts either a plain string or an array of TextContent | ImageContent. */
   sendUserMessage: (content: string | UserMessageContent[]) => void;
-  /** Subscribe to message-text deltas. The returned function unsubscribes. */
   onMessageDelta: (cb: (text: string) => void) => () => void;
   onToolStart: (cb: (toolName: string, argsSummary: string) => void) => () => void;
   onToolEnd: (cb: (toolName: string, ok: boolean) => void) => () => void;
@@ -40,9 +33,7 @@ export interface PiBridge {
    * still see activeTurn set.
    */
   onTurnEnd: (cb: () => void) => () => void;
-  /** Subscribe to agent_start; the callback receives an `abort` thunk that cancels the running pi agent. */
   onAgentStart: (cb: (abort: () => void) => void) => () => void;
-  /** Subscribe to agent error events (assistant message ended with stopReason="error"). */
   onAgentError: (cb: (message: string) => void) => () => void;
 }
 
@@ -54,7 +45,6 @@ export interface TelegramBotOptions {
   pi: PiBridge;
 }
 
-/** A queued outbound delivery: either a local file (auto-classified) or a sticker by file_id. */
 export type Attachment =
   | { kind: "file"; absPath: string }
   | { kind: "sticker"; fileId: string };
@@ -72,24 +62,15 @@ export class TelegramBot {
   private runner: RunnerHandle | null = null;
   private queue: MessageQueue<QueueItem> | null = null;
   private rateLimiter = new TelegramRateLimiter();
-  /** The streamer for the chat whose message is currently in flight inside the pi session. */
   private activeStreamer: Streamer | null = null;
-  /** Resolves when the active turn finishes. Set by runTurn, fulfilled by onTurnEnd. */
   private turnEndResolver: (() => void) | null = null;
-  /** Things queued by the agent (via telegram_attach / telegram_send_sticker) during
-   *  the current turn. Sent to the active chat after the streamer finalizes. */
   private currentTurnAttachments: Attachment[] = [];
-  /** Active turn context — set in runTurn so tools can target the right chat. */
   private activeTurn: { chatId: number; threadId: number; replyToMessageId?: number } | null = null;
-  /** Abort thunk for the currently-running pi agent loop, captured via agent_start. Cleared on turn_end. */
   private currentAgentAbort: (() => void) | null = null;
-  /** Aborted on bot.stop() to cancel in-flight inbound media downloads. */
   private shutdownAbort: AbortController = new AbortController();
 
-  /** Single global FIFO key — single-session model. */
   private static readonly GLOBAL_KEY: SessionKey = "0:0";
 
-  /** Pi-side event subscriptions; established on start, torn down on stop. */
   private piUnsubs: Array<() => void> = [];
 
   constructor(private opts: TelegramBotOptions) {}
@@ -98,12 +79,10 @@ export class TelegramBot {
     return this.state === "running";
   }
 
-  /** True while a Telegram-originated turn is being processed. Used by telegram_attach tool. */
   isInTurn(): boolean {
     return this.activeTurn !== null;
   }
 
-  /** Queue a local file path to be sent to the active chat after the current turn finalizes. */
   queueAttachment(absPath: string): void {
     if (!this.activeTurn) {
       throw new Error("telegram_attach can only be used while replying to an active Telegram turn");
@@ -114,7 +93,6 @@ export class TelegramBot {
     this.currentTurnAttachments.push({ kind: "file", absPath });
   }
 
-  /** Queue a sticker (by Bot API file_id) to be sent after the current turn finalizes. */
   queueSticker(fileId: string): void {
     if (!this.activeTurn) {
       throw new Error("telegram_send_sticker can only be used while replying to an active Telegram turn");
@@ -125,11 +103,6 @@ export class TelegramBot {
     this.currentTurnAttachments.push({ kind: "sticker", fileId });
   }
 
-  /**
-   * Set an emoji reaction on a message in the active chat. Fires IMMEDIATELY (not queued).
-   * Pass empty string for `emoji` to clear any existing reaction.
-   * If `messageId` is omitted, reacts to the user's incoming message that triggered the current turn.
-   */
   async setReaction(emoji: string, messageId?: number): Promise<void> {
     if (!this.activeTurn || !this.bot) {
       throw new Error("telegram_react can only be used while replying to an active Telegram turn");
@@ -142,9 +115,6 @@ export class TelegramBot {
     // (e.g. "❤" not "❤️"); the VS-16 form Bot API rejects with 400. The agent and most
     // input methods produce the VS-16 form by default, so normalize here.
     const normalized = emoji.replace(/️/g, "");
-    // Grammy types `emoji` as a literal union of allowed reaction emojis. We accept any
-    // string from the agent and let Telegram bounce invalid ones with a 400 — that error
-    // is more informative than refusing client-side.
     const reaction = (normalized ? [{ type: "emoji", emoji: normalized }] : []) as any;
     await this.bot.api.setMessageReaction(this.activeTurn.chatId, target, reaction);
   }
@@ -179,8 +149,6 @@ export class TelegramBot {
       await this.opts.stickerCache.reset().catch(() => undefined);
     }
 
-    // Surface unrecoverable runner errors (401 invalid token, 409 conflict, network) to
-    // the CLI instead of letting them escape as unhandled rejections that may crash pi.
     this.bot.catch((err) => {
       this.opts.cliLog(`grammy error: ${(err.error as Error)?.message ?? String(err.error)}`);
     });
@@ -193,7 +161,6 @@ export class TelegramBot {
       worker: (item, controller) => this.runTurn(item, controller),
     });
 
-    // Wire pi-side subscriptions. Deltas/tool/turn-end events route to the currently active streamer.
     this.piUnsubs.push(
       this.opts.pi.onMessageDelta((text) => {
         if (this.activeStreamer && text) this.activeStreamer.appendDelta(text);
@@ -211,7 +178,6 @@ export class TelegramBot {
     );
     this.piUnsubs.push(
       this.opts.pi.onTurnEnd(() => {
-        // Pi agent has finished a turn — its abort thunk is no longer relevant.
         this.currentAgentAbort = null;
         const r = this.turnEndResolver;
         this.turnEndResolver = null;
@@ -268,7 +234,6 @@ export class TelegramBot {
         return;
       }
       if (lower === "/reset") {
-        // Single-session model: /reset is informational. Real reset would require pi-CLI side.
         await ctx.reply(userMessages.resetUnsupported);
         return;
       }
@@ -278,20 +243,13 @@ export class TelegramBot {
       this.queue!.enqueue(TelegramBot.GLOBAL_KEY, item);
     });
 
-    // Handle reaction updates from the user (added/removed reactions on a bot message).
-    // Telegram only delivers these when allowed_updates includes "message_reaction".
-    // Bot's own reactions (set via telegram_react) are NOT echoed back as events, so
-    // there's no loop risk.
     this.bot.on("message_reaction", async (ctx) => {
       if (this.state !== "running") return;
       const upd = ctx.update.message_reaction;
       const senderId = upd.user?.id;
       if (senderId === undefined) return;
-      // Defensive self-skip: Bot API doc says bot's own reactions don't echo, but if that
-      // ever changes (or in relay scenarios), this guard cheaply closes a self-feedback loop.
       if (senderId === ctx.me.id) return;
       const cfgNow = await this.opts.configStore.load();
-      // Owner-only — silently drop non-owner reactions (matches our DM-only access policy).
       if (cfgNow.owner === null || senderId !== cfgNow.owner) return;
       if (upd.chat.type !== "private") return;
 
@@ -311,8 +269,6 @@ export class TelegramBot {
         ctx,
         promptText,
         images: [],
-        // Don't set replyToMessageId — the user reacted on a bot message; we don't
-        // want our follow-up text reply to threadedly quote the bot's own message.
       });
     });
 
@@ -331,7 +287,6 @@ export class TelegramBot {
     if (this.runner) await this.runner.stop().catch(() => undefined);
     for (const off of this.piUnsubs) off();
     this.piUnsubs = [];
-    // Cancel any in-flight inbound media downloads.
     this.shutdownAbort.abort();
     // Flush any pending sticker-cache writes so a process exit / disconnect doesn't lose
     // the last 500 ms of cache updates (debounced writer otherwise drops them).
@@ -346,8 +301,6 @@ export class TelegramBot {
 
   private handleStop(): void {
     this.queue?.abortAndClear(TelegramBot.GLOBAL_KEY);
-    // Cancel the pi agent loop if one is running. Without this, the agent keeps
-    // working in pi-CLI even though we're done caring about its output.
     if (this.currentAgentAbort) {
       try {
         this.currentAgentAbort();
@@ -420,12 +373,10 @@ export class TelegramBot {
       }
     }
     if (m.voice) {
-      // Voice = recorded-via-Telegram Ogg/Opus message. ALWAYS distinct from m.audio.
       const dest = await downloadFile(m.voice.file_id, m.voice.file_unique_id, "voice.ogg");
       if (dest) attached.push(promptFragments.voiceMessage(m.voice.duration, dest));
     }
     if (m.audio) {
-      // Audio = uploaded audio file (mp3/m4a/flac/wav/ogg). NOT a voice message.
       const name = m.audio.file_name ?? "audio";
       const dest = await downloadFile(m.audio.file_id, m.audio.file_unique_id, name);
       if (dest) {
@@ -445,9 +396,6 @@ export class TelegramBot {
       const kind: "static" | "video" | "lottie" =
         sk.is_animated ? "lottie" : sk.is_video ? "video" : "static";
       if (kind === "static") {
-        // Cache lookup BEFORE any work — if we've seen this sticker before we don't
-        // re-download the .webp and don't re-pass it to the agent's vision context;
-        // we just inject a stable sticker_id so the agent can echo it back.
         const cached = await this.opts.stickerCache.get(sk.file_unique_id);
         if (cached) {
           attached.push(promptFragments.stickerSeenBefore(sk.emoji ?? null, sk.file_unique_id));
@@ -460,7 +408,6 @@ export class TelegramBot {
               const buf = await readFile(dest);
               images.push({ type: "image", data: buf.toString("base64"), mimeType: "image/webp" });
               attached.push(promptFragments.stickerFirstTime(sk.emoji ?? null, sk.file_unique_id));
-              // Save AFTER successful image ingest so a download-failure doesn't pollute the cache.
               await this.opts.stickerCache.set(sk.file_unique_id, {
                 fileId: sk.file_id,
                 emoji: sk.emoji ?? null,
@@ -468,7 +415,7 @@ export class TelegramBot {
               });
               injected = true;
             } catch {
-              // fall through to text-only
+              void 0;
             }
           }
           if (!injected) {
@@ -476,10 +423,8 @@ export class TelegramBot {
           }
         }
       } else if (kind === "video") {
-        // Video stickers — emoji only. Don't download .webm, don't pass to the agent.
         attached.push(promptFragments.videoSticker(sk.emoji ?? null));
       } else {
-        // Lottie animated sticker — emoji only.
         attached.push(promptFragments.animatedSticker(sk.emoji ?? null));
       }
     }
@@ -492,7 +437,6 @@ export class TelegramBot {
     const userText = m.text ?? m.caption ?? "";
     if (userText) parts.push(userText);
     if (parts.length === 1 && images.length === 0) {
-      // only the [telegram chat=...] header — empty input
       return null;
     }
 
@@ -529,15 +473,13 @@ export class TelegramBot {
     this.activeStreamer = streamer;
     streamer.beginTurn();
 
-    // Telegram "typing..." indicator lasts ~5s and must be re-pinged. Send immediately,
-    // then every 4s until the turn ends. Forum-topic threads need the message_thread_id.
     const sendTyping = async (): Promise<void> => {
       try {
         const opts: { message_thread_id?: number } = {};
         if (threadId !== undefined && threadId > 0) opts.message_thread_id = threadId;
         await (ctx.api as any).sendChatAction(chatId, "typing", opts);
       } catch {
-        // network or 403 (bot blocked) — swallow; the turn will surface the error elsewhere.
+        void 0;
       }
     };
     void sendTyping();
@@ -557,9 +499,6 @@ export class TelegramBot {
     }
 
     try {
-      // Push the message into the pi session. If we have images (photos, static stickers),
-      // use the multimedia array form: pi.sendUserMessage accepts (TextContent | ImageContent)[].
-      // Otherwise plain text is fine.
       if (item.images.length > 0) {
         const content: UserMessageContent[] = [
           { type: "text", text: item.promptText },
@@ -569,7 +508,6 @@ export class TelegramBot {
       } else {
         this.opts.pi.sendUserMessage(item.promptText);
       }
-      // Wait for turn_end. If pi never fires it (shouldn't happen), bound the wait.
       const timeout = new Promise<void>((res) => setTimeout(res, 10 * 60_000));
       await Promise.race([turnEnded, timeout]);
       // Stop the typing-indicator pings BEFORE flushing the final reply — otherwise the
@@ -578,14 +516,13 @@ export class TelegramBot {
       clearInterval(typingTimer);
       await streamer.flush();
       await streamer.finalize();
-      // After the assistant text is finalized, send any queued attachments.
       if (this.currentTurnAttachments.length > 0) {
         await this.sendQueuedAttachments(ctx, chatId, threadId);
       }
     } catch (err) {
       this.opts.cliLog(`runTurn error: ${(err as Error)?.message ?? String(err)}`);
     } finally {
-      clearInterval(typingTimer); // idempotent if already cleared above
+      clearInterval(typingTimer);
       controller.signal.removeEventListener("abort", stopHandler);
       this.activeStreamer = null;
       this.activeTurn = null;
@@ -608,12 +545,9 @@ export class TelegramBot {
       try {
         await this.rateLimiter.wait(chatId);
         if (att.kind === "sticker") {
-          // Sticker by file_id — Bot API accepts the string directly. No size check
-          // (Telegram already stores it; we're just referencing).
           await api.sendSticker(chatId, att.fileId, { ...threadOpt });
           continue;
         }
-        // file kind — verify size first (Bot API send limits: 50 MB document, 10 MB photo).
         const st = await stat(att.absPath);
         if (st.size > maxOutBytes) {
           throw new Error(
@@ -625,8 +559,6 @@ export class TelegramBot {
         const isVideo = /\.(mp4|mov|m4v)$/i.test(lower);
         const isVoice = /\.ogg$/i.test(lower);
         const isAudio = /\.(mp3|m4a|flac|wav)$/i.test(lower);
-        // grammy expects an `InputFile` (or string URL/file_id), NOT a {source}
-        // object — that's the node-telegram-bot-api convention.
         const file = new InputFile(att.absPath);
         if (isImage) {
           await api.sendPhoto(chatId, file, { ...threadOpt });
@@ -653,7 +585,7 @@ export class TelegramBot {
             { parse_mode: "HTML", ...threadOpt },
           );
         } catch {
-          // ignore
+          void 0;
         }
       }
     }

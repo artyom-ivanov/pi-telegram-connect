@@ -4,10 +4,6 @@ import type { StickerCache } from "../bot/StickerCache.js";
 import { PairingFlow } from "../bot/PairingFlow.js";
 import { userMessages } from "../config/prompts.js";
 
-/**
- * Loose ExtensionCommandContext — we only need `ctx.ui.notify`.
- * The real type lives in @mariozechner/pi-coding-agent.
- */
 export interface CommandCtx {
   ui: { notify: (msg: string) => void };
 }

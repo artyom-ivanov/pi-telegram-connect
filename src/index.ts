@@ -21,9 +21,6 @@ import {
  * The real type is `import type { ExtensionAPI } from "@mariozechner/pi-coding-agent"`.
  */
 export interface ExtensionAPILoose {
-  // pi event handlers may optionally return a result object that pi merges in
-  // (e.g., before_agent_start may return { systemPrompt }). Our loose typing
-  // accepts any return value; pi ignores ones it doesn't recognize.
   on(event: string, handler: (e: any, ctx?: any) => any | Promise<any>): void;
   registerCommand(
     name: string,
@@ -40,7 +37,6 @@ export interface ExtensionAPILoose {
     content: string | UserMessageContent[],
     options?: { deliverAs?: "steer" | "followUp" },
   ): void;
-  /** Register an LLM-callable tool. Loose typing — pi's TooDefinition has many optional fields. */
   registerTool(tool: {
     name: string;
     label: string;
@@ -68,13 +64,9 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   const stickerCache = new StickerCache(stickerCachePath);
 
   const cliLog = (msg: string) => {
-    // pi-CLI loggers vary; the safest place is process.stderr so it shows in pi's debug output.
     process.stderr.write(`[telegram-connect] ${msg}\n`);
   };
 
-  // Build the pi-bridge that TelegramBot consumes. Every callback registration
-  // returns an unsubscribe function. pi.on doesn't return one, so we keep sets
-  // of "active" callbacks; on stop we just empty the sets.
   type Cb<T extends any[]> = (...a: T) => void;
   const deltaCbs = new Set<Cb<[string]>>();
   const toolStartCbs = new Set<Cb<[string, string]>>();
@@ -84,11 +76,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   const agentErrorCbs = new Set<Cb<[string]>>();
 
   pi.on("message_update", (e: any) => {
-    // Real event shape (from @mariozechner/pi-coding-agent extensions/types.d.ts):
-    //   { type: "message_update", message, assistantMessageEvent }
-    // assistantMessageEvent is a discriminated union from @mariozechner/pi-ai;
-    // text streaming uses { type: "text_delta", delta: string, ... }.
-    // Errors during streaming arrive as { type: "error", reason, error: AssistantMessage }.
     const ev = e?.assistantMessageEvent;
     if (ev?.type === "text_delta" && typeof ev.delta === "string" && ev.delta.length > 0) {
       for (const cb of deltaCbs) cb(ev.delta);
@@ -101,7 +88,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     }
   });
   pi.on("tool_execution_start", (e: any) => {
-    // Real shape: { type, toolCallId, toolName, args }
     const name = String(e?.toolName ?? "tool");
     let argsSummary = "";
     try {
@@ -112,7 +98,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     for (const cb of toolStartCbs) cb(name, argsSummary);
   });
   pi.on("tool_execution_end", (e: any) => {
-    // Real shape: { type, toolCallId, toolName, result, isError }
     const name = String(e?.toolName ?? "tool");
     const ok = e?.isError !== true;
     for (const cb of toolEndCbs) cb(name, ok);
@@ -124,8 +109,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   // after a bash tool) would arrive after we'd already torn down activeTurn.
   // agent_end is the canonical end-of-processing signal.
   pi.on("agent_end", (e: any) => {
-    // Inspect the last assistant message; if it ended with stopReason "error",
-    // surface it so the active streamer can display _⚠️ error: <msg>_.
     const messages = Array.isArray(e?.messages) ? e.messages : [];
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
@@ -142,22 +125,18 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     }
     for (const cb of turnEndCbs) cb();
   });
-  // Capture the abort thunk so /stop can really cancel the agent loop in pi.
   pi.on("agent_start", (_event: any, ctx: any) => {
     if (typeof ctx?.abort === "function") {
       const abort = (): void => {
         try {
           ctx.abort();
         } catch {
-          // ignore — pi may be in a state where abort is a no-op
+          void 0;
         }
       };
       for (const cb of agentStartCbs) cb(abort);
     }
   });
-
-  // System-prompt suffix and TELEGRAM_PREFIX live in src/config/prompts.ts.
-  // (before_agent_start handler is registered below — it depends on `bot` being constructed.)
 
   const bridge: PiBridge = {
     sendUserMessage: (content) => pi.sendUserMessage(content),
@@ -213,14 +192,8 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     pi.registerCommand(c.name, { description: c.description, handler: c.handler });
   }
 
-  // Outbound sandbox roots: tmpDir (where Telegram inbound files land — agent may
-  // forward them) and the current working directory of the pi-CLI process (where
-  // the agent typically generates artifacts).
   const outboundRoots: string[] = [resolve(expandHome(tmpDir)), resolve(process.cwd())];
 
-  // Register the file-attach tool. Mirrors pi-telegram's pattern: the agent calls
-  // telegram_attach with paths to queue them for the current Telegram reply; the
-  // bot sends them after the assistant's text turn finalizes.
   pi.registerTool({
     name: "telegram_attach",
     label: "Telegram Attach",
@@ -253,7 +226,7 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
               inSandbox = true;
               break;
             } catch {
-              // try next root
+              void 0;
             }
           }
           if (!inSandbox) {
@@ -285,9 +258,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     },
   });
 
-  // Register the sticker echo tool. Stickers the user has previously sent are cached
-  // by their `sticker_id` (= file_unique_id). The agent recalls a sticker_id from the
-  // prompt and asks us to send the cached sticker back via Bot API's sendSticker.
   pi.registerTool({
     name: "telegram_send_sticker",
     label: "Telegram Send Sticker",
@@ -321,9 +291,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
     },
   });
 
-  // Register the reaction tool. Unlike telegram_attach / telegram_send_sticker which
-  // queue for delivery after the assistant's text turn ends, reactions fire immediately —
-  // useful for "acknowledging" a message ("👀") while the agent is still generating its reply.
   pi.registerTool({
     name: "telegram_react",
     label: "Telegram React",
@@ -375,7 +342,6 @@ export default function piTelegramConnect(pi: ExtensionAPILoose): { name: string
   return { name: "pi-telegram-connect", version: "0.1.0" };
 }
 
-// Public re-exports (if anyone imports the package as a library)
 export { ConfigStore } from "./config/ConfigStore.js";
 export { TelegramBot } from "./bot/TelegramBot.js";
 export type { Config } from "./config/schema.js";

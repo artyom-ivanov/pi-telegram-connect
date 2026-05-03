@@ -78,7 +78,6 @@ describe("ConfigStore", () => {
       botToken: "123:ABC",
       owner: 42,
       pendingPairCode: { code: "abcDEF", expiresAt: Date.now() + 60000, attempts: 0 },
-      // v1-only fields that should be dropped after migration:
       policies: { dm: "allowlist", group: "open" },
       allowedUsers: [42],
       allowedGroups: [],
@@ -97,14 +96,12 @@ describe("ConfigStore", () => {
     expect(cfg.showToolFooter).toBe(false);
     expect((cfg as any).policies).toBeUndefined();
     expect((cfg as any).allowedUsers).toBeUndefined();
-    // The migrated form is persisted to disk so the next load is direct.
     const reloaded = JSON.parse(await readFile(path, "utf8"));
     expect(reloaded.version).toBe(2);
     expect(reloaded.policies).toBeUndefined();
   });
 
   it("forward-compat: v2 config missing newly-added fields is filled with defaults (not backed up)", async () => {
-    // Simulate an older v2 install that doesn't yet have `showToolFooter` and `maxOutgoingFileMb`.
     const partial = {
       version: 2,
       botToken: "tok",
@@ -119,7 +116,6 @@ describe("ConfigStore", () => {
     expect(cfg.owner).toBe(7);
     expect(cfg.showToolFooter).toBe(false);
     expect(cfg.limits.maxOutgoingFileMb).toBe(50);
-    // No `.broken.*` backup should have been created — partial v2 is recoverable, not corrupt.
     const { readdir } = await import("node:fs/promises");
     const files = await readdir(dir);
     expect(files.some((f) => f.includes(".broken."))).toBe(false);

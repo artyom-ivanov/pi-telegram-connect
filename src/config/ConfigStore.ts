@@ -46,8 +46,6 @@ export class ConfigStore {
       return structuredClone(DEFAULT_CONFIG);
     }
     const versionField = (parsed as { version?: unknown })?.version;
-    // v1 → v2 migration: keep botToken, owner, pendingPairCode; drop everything else
-    // (allowlists, policies, group settings, sessions, pendingGroupAccess, dead limits).
     if (versionField === 1) {
       const v1 = parsed as { botToken?: unknown; owner?: unknown; pendingPairCode?: unknown };
       const migrated: Config = {
@@ -59,7 +57,6 @@ export class ConfigStore {
             ? (v1.pendingPairCode as Config["pendingPairCode"])
             : null,
       };
-      // Persist migrated form so subsequent loads are direct.
       await this.persist(migrated);
       return migrated;
     }
@@ -68,13 +65,10 @@ export class ConfigStore {
         `pi-telegram-connect: unknown config schema version ${String(versionField)} in ${this.path}; expected 2`,
       );
     }
-    // Forward-compat fill-in: when we add new optional fields in later patches,
-    // existing v2 configs lack them. Rather than backup-and-reset (losing botToken
-    // and owner), fill in defaults for any missing top-level field or limits sub-field.
     const p = parsed as Record<string, unknown>;
     const topDefaults = DEFAULT_CONFIG as unknown as Record<string, unknown>;
     for (const k of Object.keys(topDefaults)) {
-      if (k === "limits") continue; // handled below
+      if (k === "limits") continue;
       if (p[k] === undefined) p[k] = structuredClone(topDefaults[k]);
     }
     const limitsDefaults = DEFAULT_CONFIG.limits as unknown as Record<string, unknown>;
@@ -94,14 +88,13 @@ export class ConfigStore {
     return parsed as Config;
   }
 
-  /** Internal: write without re-validating (used by migration). Same atomic write semantics. */
   private async persist(cfg: Config): Promise<void> {
     await this.mutex.run(async () => {
       let release: (() => Promise<void>) | null = null;
       try {
         release = await lockfile.lock(this.path, { realpath: false, retries: { retries: 5, minTimeout: 50 } });
       } catch {
-        // ignore
+        void 0;
       }
       try {
         const tmp = `${this.path}.tmp.${randomBytes(4).toString("hex")}`;
@@ -109,7 +102,7 @@ export class ConfigStore {
         try {
           await chmod(tmp, 0o600);
         } catch {
-          // ignore
+          void 0;
         }
         await rename(tmp, this.path);
       } finally {
@@ -127,7 +120,7 @@ export class ConfigStore {
       try {
         release = await lockfile.lock(this.path, { realpath: false, retries: { retries: 5, minTimeout: 50 } });
       } catch {
-        // lock already held; let mutex serialize within this process; cross-process best-effort
+        void 0;
       }
       try {
         const tmp = `${this.path}.tmp.${randomBytes(4).toString("hex")}`;
@@ -135,7 +128,7 @@ export class ConfigStore {
         try {
           await chmod(tmp, 0o600);
         } catch {
-          // ignore
+          void 0;
         }
         await rename(tmp, this.path);
       } finally {

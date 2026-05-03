@@ -11,7 +11,6 @@ export interface ResolveDestArgs {
   fileUniqueId: string;
 }
 
-/** Returns absolute destination path, ensuring it is inside tmpDir. Creates parent dirs. */
 export async function resolveDestPath(args: ResolveDestArgs): Promise<string> {
   const root = resolve(expandHome(args.tmpDir));
   const subdir = join(root, String(args.chatId), String(args.threadId));
@@ -31,7 +30,6 @@ export interface DownloadArgs {
   signal: AbortSignal;
 }
 
-/** Stream-download with size cap; throws "file_too_large" if exceeded. */
 export async function downloadToPath(args: DownloadArgs): Promise<void> {
   const res = await fetch(args.url, { signal: args.signal });
   if (!res.ok || !res.body) {
@@ -49,7 +47,7 @@ export async function downloadToPath(args: DownloadArgs): Promise<void> {
       try {
         await reader.cancel();
       } catch {
-        // ignore
+        void 0;
       }
       throw new Error("file_too_large");
     }
@@ -63,6 +61,6 @@ export async function unlinkSafe(path: string): Promise<void> {
   try {
     await unlink(path);
   } catch {
-    // ignore
+    void 0;
   }
 }

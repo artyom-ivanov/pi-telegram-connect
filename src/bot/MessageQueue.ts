@@ -2,7 +2,6 @@ import type { SessionKey } from "../types.js";
 
 export interface QueueOptions<T> {
   maxDepth: number;
-  /** When the queue is full, choose how to make room (or reject). */
   overflow: "drop-oldest" | "coalesce-newest" | "reject";
   worker: (item: T, controller: AbortController) => Promise<void>;
 }
@@ -50,8 +49,6 @@ export class MessageQueue<T> {
         try {
           await this.opts.worker(item, lane.abort);
         } catch (err) {
-          // worker is responsible for surfacing per-message errors;
-          // we keep the lane alive to drain remaining items
           // eslint-disable-next-line no-console
           console.error(`[MessageQueue ${key}] worker error:`, err);
         }
@@ -61,7 +58,6 @@ export class MessageQueue<T> {
     }
   }
 
-  /** Abort the current turn and clear the queue for this key. */
   abortAndClear(key: SessionKey): void {
     const lane = this.lanes.get(key);
     if (!lane) return;
@@ -70,7 +66,6 @@ export class MessageQueue<T> {
     lane.abort = new AbortController();
   }
 
-  /** Abort everything and drop all queues. Used by drain state. */
   abortAll(): void {
     for (const [, lane] of this.lanes) {
       lane.abort.abort();
@@ -78,7 +73,6 @@ export class MessageQueue<T> {
     }
   }
 
-  /** Pending items count for the given key. */
   size(key: SessionKey): number {
     return this.lanes.get(key)?.items.length ?? 0;
   }

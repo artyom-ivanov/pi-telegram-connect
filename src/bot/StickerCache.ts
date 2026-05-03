@@ -2,11 +2,8 @@ import { readFile, writeFile, rename, chmod, unlink } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 
 export interface StickerCacheEntry {
-  /** Stable file_id for re-sending via bot.api.sendSticker. */
   fileId: string;
-  /** Sticker pack emoji hint, if Telegram provided one. */
   emoji: string | null;
-  /** Unix ms of last sighting — useful for debugging, not for eviction (unbounded for now). */
   seenAt: number;
 }
 
@@ -17,16 +14,6 @@ interface CacheShape {
 
 const EMPTY: CacheShape = { version: 1, entries: {} };
 
-/**
- * Persistent cache mapping `file_unique_id` → sticker info.
- *
- * `file_unique_id` is stable across messages and bot restarts (sticker content hash);
- * `file_id` is what Bot API needs to send the same sticker back. Telegram's `file_id`
- * is bot-scoped but persistent for the bot, so caching it lets us echo a sticker without
- * re-uploading.
- *
- * Writes are serialized + atomic (tmp + rename) and debounced 500 ms to coalesce bursts.
- */
 export class StickerCache {
   private cache: CacheShape | null = null;
   private writeTimer: NodeJS.Timeout | null = null;
@@ -57,20 +44,17 @@ export class StickerCache {
     return this.cache;
   }
 
-  /** Look up by `file_unique_id`. Returns null on miss. */
   async get(fileUniqueId: string): Promise<StickerCacheEntry | null> {
     const c = await this.load();
     return c.entries[fileUniqueId] ?? null;
   }
 
-  /** Insert/update. Persists asynchronously (debounced). */
   async set(fileUniqueId: string, entry: StickerCacheEntry): Promise<void> {
     const c = await this.load();
     c.entries[fileUniqueId] = entry;
     this.scheduleSave();
   }
 
-  /** Wipe the cache file. Called by /telegram-reset-stickers-cache. */
   async reset(): Promise<void> {
     if (this.writeTimer) {
       clearTimeout(this.writeTimer);
@@ -82,12 +66,11 @@ export class StickerCache {
       try {
         await unlink(this.path);
       } catch {
-        // ignore — file may not exist
+        void 0;
       }
     });
   }
 
-  /** Force flush any pending writes (e.g., on shutdown). */
   async flush(): Promise<void> {
     if (this.writeTimer) {
       clearTimeout(this.writeTimer);
@@ -115,7 +98,7 @@ export class StickerCache {
       try {
         await chmod(tmp, 0o600);
       } catch {
-        // ignore
+        void 0;
       }
       await rename(tmp, this.path);
     });

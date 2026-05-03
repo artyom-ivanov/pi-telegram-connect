@@ -10,13 +10,6 @@ export function expandHome(p: string): string {
 
 const FORBIDDEN_NAME = /^[.]+$/;
 
-/**
- * Sanitize a Telegram-supplied filename.
- * - basename to defeat traversal
- * - strip to [A-Za-z0-9._-]
- * - cap at 80 chars
- * - reject empty / dotfiles → fallback
- */
 export function sanitizeFilename(input: string | undefined | null, fallback: string): string {
   if (!input) return fallback;
   const base = basename(String(input));
@@ -25,9 +18,6 @@ export function sanitizeFilename(input: string | undefined | null, fallback: str
   return cleaned;
 }
 
-/**
- * Assert that `child` resolves to a path inside `root`.
- */
 export async function assertInsideRoot(
   child: string,
   root: string,
@@ -39,7 +29,7 @@ export async function assertInsideRoot(
     try {
       childAbs = await realpath(childAbs);
     } catch {
-      // file may not exist yet
+      void 0;
     }
   }
   const rootWithSep = rootAbs.endsWith(sep) ? rootAbs : rootAbs + sep;

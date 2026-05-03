@@ -10,14 +10,6 @@ export interface AccessInput {
 
 export type AccessDecision = { decision: "allow" } | { decision: "drop" } | { decision: "pair" };
 
-/**
- * Single-user, DM-only policy.
- *
- * - Non-private chats (groups, supergroups, channels): silently drop.
- * - DM with `pendingPairCode` set AND the message looks like a pair attempt: route to pairing.
- * - DM from owner: allow.
- * - Anything else (DM from non-owner before/after pairing): silently drop.
- */
 export function evaluateAccess(input: AccessInput): AccessDecision {
   if (input.draining) return { decision: "drop" };
   if (input.chatType !== "private") return { decision: "drop" };

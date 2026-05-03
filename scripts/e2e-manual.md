@@ -1,79 +1,83 @@
 # Manual E2E Checklist for pi-telegram-connect
 
+Use this for a final smoke test against a real Telegram bot before publishing.
+
 ## Setup
 
-1. Create a test bot via @BotFather. Save the token.
+1. Create a test bot via @BotFather and save the token.
 2. `export PI_TG_TEST_TOKEN=<token>`
-3. In a fresh terminal: `npm run build && pi`. Inside `pi`-CLI: `/telegram-connect $PI_TG_TEST_TOKEN`.
+3. In a fresh terminal: `npm run build && pi`
+4. Inside `pi`-CLI: `/telegram-connect $PI_TG_TEST_TOKEN`
 
 ## Pairing
 
-- [ ] CLI prints a 6-char code.
-- [ ] DM bot with random 6-char string (wrong code) → bot stays SILENT.
-- [ ] DM bot with non-pairing-code text → bot stays SILENT.
-- [ ] DM bot with the printed code → bot replies "✅ You are now the owner."
-- [ ] CLI: `/telegram-status` shows owner = your user_id, dm policy = allowlist.
-- [ ] DM bot 5 wrong codes (in a fresh `/telegram-connect` cycle) → 6th attempt: bot stays silent and CLI logs "Pairing aborted".
+- [ ] CLI prints a 6-character code.
+- [ ] DM the bot with random non-code text before pairing -> bot stays silent.
+- [ ] DM the bot with a wrong 6-character code -> bot stays silent.
+- [ ] DM the bot with the printed code -> bot replies `✅ Ownership confirmed. Use /help to see commands.`
+- [ ] CLI `/telegram-status` shows `Running: true` and the owner user ID.
+- [ ] Fresh pairing cycle: 5 wrong code attempts invalidate the pending code; the correct code no longer pairs afterward.
 
-## DM allowlist
+## Access Policy
 
-- [ ] After pairing: DM bot from another account → bot stays SILENT.
-- [ ] CLI: `/telegram-allow <other_user_id>` → from that account, DM works.
-- [ ] CLI: `/telegram-revoke <other_user_id>` → DM goes silent again.
-- [ ] CLI: `/telegram-policy dm open` → any DM works.
-- [ ] CLI: `/telegram-policy dm disabled` → no DMs work, even owner's.
+- [ ] After pairing, DM from the owner account works.
+- [ ] DM from a different account stays silent.
+- [ ] Add the bot to a group or supergroup and send messages -> bot stays silent.
+- [ ] Start with explicit owner: `/telegram-connect $PI_TG_TEST_TOKEN --owner <user_id>` skips pairing and owner DM works.
+- [ ] Restart `pi`, run `/telegram-connect` with no args -> stored token and owner are reused.
 
 ## Streaming
 
-- [ ] DM "explain how grammY runner concurrency lanes work" → bot replies, message edits live (3s throttle visible).
-- [ ] During a long answer with a tool call: tool indicator `_⚙️ running: <tool>(...)_` appears at end of preview, disappears when tool finishes.
-- [ ] Reply > 4096 chars: continuation message appears; first message is finalized; second begins live-updating.
-- [ ] Reply taking > 60 seconds: at age=60s, current preview is finalized; new continuation message starts live-updating.
+- [ ] Ask for a long answer -> message edits live with about a 3-second throttle.
+- [ ] Ask for a task that uses tools before replying -> `_Working..._` header appears with tool status.
+- [ ] Final message omits tool history by default.
+- [ ] Set `"showToolFooter": true` in `~/.pi/agent/telegram-connect.json`, reconnect, and verify final message includes completed tool history.
+- [ ] Reply longer than Telegram's message limit continues in a new message.
+- [ ] Markdown with code blocks, links, lists, and bold/italic renders acceptably; malformed HTML falls back to plain text.
 
-## /stop and /reset
+## Stop and Reset
 
-- [ ] DM long task; quickly send `/stop` → reply ends with `_⏹ stopped_`, no further edits.
-- [ ] DM `/reset` → bot replies "History cleared for this chat."; following DM starts fresh context.
+- [ ] DM a long-running task, then send `/stop` -> current answer ends with a stopped marker and queued Telegram messages are cleared.
+- [ ] Verify the pi agent loop is actually aborted, not only Telegram output.
+- [ ] DM `/reset` -> bot replies that reset is not supported from Telegram.
 
-## Media inbound
+## Inbound Media
 
-- [ ] Send a photo → agent gets it as image input; describes correctly.
-- [ ] Send a voice message → agent receives "[user attached files] - voice (Ns): /tmp/...". Agent can `read_file` it.
-- [ ] Send a video → same.
-- [ ] Send a document (e.g., 50KB .txt) → same.
-- [ ] Send a sticker (static) → injection: "[user sent sticker: <description> (emoji: ...)]". Subsequent send of the SAME sticker uses cached description (verify by inspecting `~/.pi/agent/telegram-connect-stickers.json`).
-- [ ] Send a video sticker (.webm) → first-frame description (if ffmpeg installed).
-- [ ] Send an animated Lottie sticker (.tgs) → injection: "[user sent animated sticker (emoji: ...)]" — no download.
-- [ ] Send a 25 MB file → bot replies with `[file too large: ..., 25MB, skipped]` block in agent's view.
+- [ ] Send a photo -> agent receives image content and can describe it.
+- [ ] Send a voice message -> prompt includes `voice (...s): <local path>`.
+- [ ] Send an uploaded audio/music file -> prompt includes `audio ...: <local path>`, distinct from voice.
+- [ ] Send a video -> prompt includes `video (...s): <local path>`.
+- [ ] Send a document -> prompt includes `document: <local path>`.
+- [ ] Send a static sticker first time -> prompt includes a new sticker marker and image content.
+- [ ] Send the same static sticker again -> prompt includes a seen sticker marker and does not re-ingest image content.
+- [ ] Send a video sticker -> prompt includes only a video sticker emoji marker.
+- [ ] Send a Lottie sticker -> prompt includes only an animated sticker emoji marker.
+- [ ] Send a file larger than `maxIncomingFileMb` -> prompt includes a file-too-large marker.
 
-## Media outbound
+## Outbound Media
 
-- [ ] Place a `.ogg` Opus file under `~/.pi/agent/tmp/`. Ask agent to send it as voice → `telegram_send_voice` invoked, file delivered.
-- [ ] Same for photo (.jpg), video (.mp4), document, sticker (.webp).
-- [ ] Ask agent to send `/etc/passwd` as document → tool returns `path_outside_sandbox`; preview shows `_⚠️ send failed: path_outside_sandbox_`.
-- [ ] Ask agent to send a non-Ogg file as voice → tool returns `invalid_format`.
+- [ ] Ask the agent to create and send a file under the current working directory -> `telegram_attach` queues and sends it.
+- [ ] Verify extension-based classification: photo, video, voice `.ogg`, audio, and document.
+- [ ] Ask the agent to send a file under `~/.pi/agent/tmp/` -> allowed.
+- [ ] Ask the agent to send a path outside allowed roots, such as `/etc/passwd` -> tool refuses it.
+- [ ] Ask the agent to send more than 10 files in one turn -> tool enforces the per-turn limit.
+- [ ] Ask the agent to send a previously seen sticker by `sticker_id` -> bot sends the cached sticker.
+- [ ] Run `/telegram-reset-stickers-cache`; sending the same sticker again should re-learn it.
 
-## Groups
+## Reactions
 
-- [ ] Add bot to a test group with `policy.group = allowlist`. Bot DMs you with Allow/Deny → tap Allow.
-- [ ] In the group with `replyMode: mention`: send normal text → bot silent. Reply to a bot message → bot replies. `@bot_username hi` → bot replies.
-- [ ] Set group `replyMode: all`, `replyFrequency: rare`. Send small-talk → bot stays silent (LLM emits `[[skip]]`). Send a directed question → bot replies.
-- [ ] Set group `replyMode: owner`. Owner messages → bot replies; other members' messages → silent.
-- [ ] Forum group with topics: `/reset` in topic A → topic A's history cleared, topic B unaffected.
+- [ ] Ask a long-running question where acknowledgement is natural -> agent can call `telegram_react` before text arrives.
+- [ ] React to a bot message with a neutral reaction -> agent should usually emit `[[skip]]`, producing no Telegram reply.
+- [ ] React with a disagreement or clarification reaction, such as `🤔` or `👎` -> agent may send a follow-up.
 
-## Group lifecycle
+## Disconnect and Token Rotation
 
-- [ ] Bot kicked from group → CLI logs "Group X evicted"; group removed from allowedGroups; subsequent re-add requires Allow flow again.
+- [ ] CLI `/telegram-disconnect` mid-stream -> in-flight turn aborts and queues drop.
+- [ ] Reconnect with the same token -> owner and sticker cache are preserved.
+- [ ] Reconnect with a different valid token -> sticker cache is cleared.
+- [ ] Start with an invalid token -> `/telegram-connect` fails before printing a pairing code.
 
-## Disconnect
+## Release Gate
 
-- [ ] CLI `/telegram-disconnect` mid-stream → in-flight turn aborts, queues drop. Reconnect via `/telegram-connect` (same or new token) — config + sessions intact.
-
-## Token rotation / revocation
-
-- [ ] Revoke token in @BotFather while bot running → bot fatal-stops, CLI prints "Bot token invalid/revoked".
-
-## Concurrency
-
-- [ ] Fire 5 messages in quick succession to one DM → answers come back in order, FIFO.
-- [ ] Fire messages from 3 different chats → all 3 progress in parallel.
+- [ ] `npm run prepublishOnly`
+- [ ] `npm pack --dry-run`

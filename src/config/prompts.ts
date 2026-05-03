@@ -112,7 +112,6 @@ export const tools = {
   },
 };
 
-/** Strings returned to the agent as tool-result content[].text. */
 export const toolResults = {
   attachNotInTurn: "Not a Telegram turn; attachment not queued.",
   attachQueued: (n: number): string => `Queued ${n} attachment(s).`,

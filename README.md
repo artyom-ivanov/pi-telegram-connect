@@ -1,79 +1,91 @@
 # pi-telegram-connect
 
-A `pi`-CLI extension that bridges the [Pi coding agent](https://github.com/badlogic/pi-mono) to Telegram. Personal-use, single-owner: pair once, then chat with your agent from your phone.
+A `pi`-CLI extension that bridges the [Pi coding agent](https://github.com/badlogic/pi-mono) to Telegram. Personal-use, single-owner: pair once, then chat with your local agent from Telegram.
 
 ## Features
 
-- **Real-time streaming** of the agent's reply via `editMessageText` with a periodic throttle (≈3s).
+- **Single-owner Telegram DM bridge** for one local `pi` session. Groups, supergroups, and channels are intentionally ignored.
+- **Real-time streaming** via `editMessageText` with a periodic throttle (about 3 seconds), plus a final flush at turn end.
 - **Typing indicator** while the agent is working.
-- **Markdown formatting** rendered as Telegram HTML (bold, italic, code, pre, links, blockquote, spoilers); plaintext fallback if Telegram rejects.
-- **Long-message split** — replies > 4000 chars continue in a new message at a safe boundary.
-- **Owner pairing** via 6-char alphanumeric code with a 5-attempt lockout, constant-time compare.
-- **Inbound media**: photos, voice messages, audio files, video, documents, static stickers — all auto-downloaded to a sandboxed temp dir; photos & static stickers go to the agent as `image` content for vision.
-- **Outbound media** via the `telegram_attach` tool (auto-classified by extension: photo/video/voice/audio/document).
-- **Sticker echo** via `telegram_send_sticker` — re-send any sticker the user previously sent (no re-upload).
-- **Sticker cache** at `~/.pi/agent/telegram-connect-stickers.json`: first time the user sends a sticker, we pass the image to the agent and store its `file_id`; subsequent times we skip re-processing and the agent recalls it from the conversation.
-- **Reactions** via `telegram_react` (👀 to acknowledge a long-awaited message, 👍/❤️/etc. for non-verbal replies).
-- **`/stop`** to abort the current turn (cancels the agent loop in pi too); **`/reset`** is informational only — single-session model means pi-CLI owns the history.
-- **Voice vs audio distinction**: voice = recorded mic message (Ogg/Opus), audio = uploaded music/audio file. The agent is told they're different.
+- **Tool progress preview**: before the first text delta, Telegram shows a `_Working..._` header with running/completed tool calls. The final tool footer is optional via `showToolFooter`.
+- **Markdown formatting** rendered as Telegram HTML (bold, italic, code, pre, links, blockquote, spoilers where supported); plaintext fallback if Telegram rejects the HTML.
+- **Long-message split**: replies over Telegram's message limit continue in new messages at safe boundaries.
+- **Silent reaction handling**: user reactions are forwarded to the agent as synthetic prompts; the prompt instructs the agent to answer with `[[skip]]` unless the reaction clearly asks for follow-up.
+- **Owner pairing** via 6-character alphanumeric code with 5-minute validity, 5-attempt lockout, and constant-time compare.
+- **Token validation** with Telegram `getMe` before pairing, so bad bot tokens fail immediately.
+- **Inbound media**: photos, voice messages, audio files, video, documents, and static stickers are downloaded to a sandboxed temp dir. Photos and first-time static stickers are also passed to the agent as image content.
+- **Voice vs audio distinction**: voice means a Telegram mic recording (Ogg/Opus); audio means an uploaded audio/music file. The agent is told they are different.
+- **Outbound media** via `telegram_attach`, auto-classified by extension as photo, video, voice, audio, or document.
+- **Sticker echo** via `telegram_send_sticker` for stickers the owner previously sent.
+- **Sticker cache** at `~/.pi/agent/telegram-connect-stickers.json`; it is cleared automatically when the bot token changes and can be reset manually.
+- **Reactions** via `telegram_react`, useful for lightweight acknowledgement while a long reply is still running.
+- **`/stop`** aborts the current Telegram turn and calls `ctx.abort()` on the pi side. **`/reset`** is informational only; pi-CLI owns conversation history.
 
 ## Install
 
 ```bash
-# build the package
 git clone https://github.com/artyom-ivanov/pi-telegram-connect
 cd pi-telegram-connect
 npm install
 npm run build
 
-# register with pi
 pi install /absolute/path/to/pi-telegram-connect
 ```
 
-`pi` discovers extensions through its own settings (`~/.pi/agent/settings.json#packages`), not via npm globals. Use `pi install <path>` to register the local package, or `pi install npm:@artyom-ivanov/pi-telegram-connect` once published.
+`pi` discovers extensions through its own settings (`~/.pi/agent/settings.json#packages`), not via npm globals. Use `pi install <path>` to register a local checkout, or `pi install npm:@artyom-ivanov/pi-telegram-connect` once the package is published.
 
-## Quick start
+## Quick Start
 
-1. Create a bot via [@BotFather](https://t.me/BotFather), grab its token.
-2. In `pi`:
-   ```
+1. Create a bot via [@BotFather](https://t.me/BotFather) and copy its token.
+2. In `pi`, start the bridge:
+
+   ```text
    > /telegram-connect 123:ABC...
-   Bot started. Send this code to the bot in DM to claim ownership: aB7xK3 (valid 5 min)
+   Bot started. DM this code to claim ownership: aB7xK3 (expires in 5 min).
    ```
-3. DM the bot with `aB7xK3`. Bot replies `✅ You are now the owner.`
-4. Talk to it like you would in pi-CLI. The agent has full pi-CLI tools (bash, file edits, etc.) and three Telegram-specific tools (attach, send sticker, react).
 
-After a `pi` restart, just run `/telegram-connect` with no args — it reuses the stored token and owner.
+3. DM the bot with the printed code. The bot replies: `✅ Ownership confirmed. Use /help to see commands.`
+4. Chat with it like you would in pi-CLI. The agent keeps its normal pi tools and, during Telegram-originated turns, also gets Telegram-specific tools.
+
+After a `pi` restart, run `/telegram-connect` with no args. It reuses the stored token and owner.
+
+To skip pairing when you already know your numeric Telegram user ID:
+
+```text
+> /telegram-connect 123:ABC... --owner 840273
+```
 
 ## Commands
 
-CLI (inside `pi`):
+CLI commands inside `pi`:
 
 | Command | Description |
-|---|---|
-| `/telegram-connect [<token>] [--owner <user_id>]` | Start the bot. With no args: reuses stored token + owner. With `--owner`: skips pairing. |
-| `/telegram-disconnect` | Stop the bot. Config is preserved. |
+| --- | --- |
+| `/telegram-connect [<token>] [--owner <user_id>]` | Start the bot. With no token, reuses stored config. With `--owner`, skips pairing. |
+| `/telegram-disconnect` | Stop the bot. Config and sticker cache are preserved. |
 | `/telegram-status` | Show whether the bot is running and the current owner. |
-| `/telegram-reset-stickers-cache` | Wipe the sticker cache (re-learns next time the user sends each sticker). |
+| `/telegram-reset-stickers-cache` | Wipe the sticker cache; stickers are re-learned next time the owner sends them. |
 
-Bot DM commands (owner only):
+Bot DM commands, owner only:
 
 | Command | Description |
-|---|---|
-| `/stop` | Abort the agent's current turn (also calls `ctx.abort()` on the pi side). |
-| `/reset` | Informational — single-session bridge can't reset pi's history. Use pi-CLI to manage history. |
+| --- | --- |
+| `/stop` | Abort the active turn and clear queued Telegram messages. |
+| `/reset` | Informational only: reset is not supported from Telegram in the single-session model. |
 
-## Tools the agent gets
+## Agent Tools
 
-Registered via `pi.registerTool` only when the current turn is from Telegram (so the agent doesn't see them in plain pi-CLI sessions):
+These tools are registered with `pi.registerTool`, but they only work while the current turn came from Telegram:
 
-- **`telegram_attach({paths: string[]})`** — queue local files for delivery with the current reply. Auto-classified: `.jpg`/`.png`/`.webp`/`.gif` → photo, `.mp4`/`.mov` → video, `.ogg` → voice, `.mp3`/`.m4a`/`.flac`/`.wav` → audio, anything else → document. Sandbox: paths must resolve under `process.cwd()` (the pi working dir) or `~/.pi/agent/tmp/`.
-- **`telegram_send_sticker({stickerId})`** — re-send a sticker the user previously sent. The `stickerId` comes from `[user sent sticker (... sticker_id=<id> ...)]` markers in earlier prompts.
-- **`telegram_react({emoji, messageId?})`** — set an emoji reaction on a message. Default target = the user's incoming message in the current turn. Empty string clears the reaction. Telegram only accepts emojis from its standard reaction palette; obscure ones are rejected.
+- **`telegram_attach({ paths: string[] })`**: queue up to 10 local files for delivery after the assistant's text reply finalizes. Paths must resolve under the current `pi` working directory or `~/.pi/agent/tmp/`. Type is inferred from extension: `.jpg`/`.jpeg`/`.png`/`.webp`/`.gif` as photo, `.mp4`/`.mov`/`.m4v` as video, `.ogg` as voice, `.mp3`/`.m4a`/`.flac`/`.wav` as audio, everything else as document.
+- **`telegram_send_sticker({ stickerId })`**: queue a previously seen sticker by `file_unique_id`. The ID appears in sticker markers injected into earlier Telegram prompts.
+- **`telegram_react({ emoji, messageId? })`**: set or clear one reaction. Omitting `messageId` targets the owner message that triggered the current turn. Pass `""` to clear.
+
+Plain-text file paths in the assistant reply do not send files. The agent must save the artifact under an allowed root and call `telegram_attach`.
 
 ## Configuration
 
-Stored at `~/.pi/agent/telegram-connect.json` (mode `0600`).
+Main config is stored at `~/.pi/agent/telegram-connect.json` with mode `0600`.
 
 ```jsonc
 {
@@ -81,55 +93,79 @@ Stored at `~/.pi/agent/telegram-connect.json` (mode `0600`).
   "botToken": "123:ABC...",
   "owner": 840273,
   "pendingPairCode": null,
+  "showToolFooter": false,
   "limits": {
-    "maxIncomingFileMb": 20,    // cloud Bot API getFile cap is 20 MB; larger files are skipped
-    "maxOutgoingFileMb": 50,    // cloud Bot API send-document cap is 50 MB; we refuse oversize uploads
-    "maxQueueDepth": 32         // per-chat FIFO depth; rarely matters in single-user mode
+    "maxIncomingFileMb": 20, // Telegram cloud Bot API getFile cap
+    "maxOutgoingFileMb": 50, // sendDocument cap used as the package-level upload limit
+    "maxQueueDepth": 32 // single global FIFO queue depth
   }
 }
 ```
 
-Sticker cache (separate file): `~/.pi/agent/telegram-connect-stickers.json`.
+Sticker cache is stored separately at `~/.pi/agent/telegram-connect-stickers.json`.
 
-Inbound temp files land under `~/.pi/agent/tmp/telegram/<chat_id>/<thread_id>/<msg_id>-<filename>` (filenames sanitized to `[A-Za-z0-9._-]`).
+Inbound temp files land under:
 
-A v1 → v2 migration runs automatically on first load: `botToken`, `owner`, `pendingPairCode` are preserved; everything else (allowlists, group policies, dead `limits.*` fields) is dropped.
-
-## Architecture
-
-Single-session bridge: one pi-CLI = one Telegram bot, one user (the owner). Non-private chats (groups, channels) are silently dropped — this connector is intentionally personal-use.
-
-Inbound flow:
-
-```
-Telegram message → AccessControl (owner check + pairing)
-                 → MessageQueue (per-chat FIFO; single global lane in practice)
-                 → MediaIngest (download to ~/.pi/agent/tmp/telegram/...)
-                 → StickerCache (lookup or insert)
-                 → pi.sendUserMessage([text + base64 images])
-                 → pi.on("message_update", ...) → Streamer.appendDelta
-                 → pi.on("agent_end", ...) → Streamer.finalize
-                 → sendQueuedAttachments (files + stickers from telegram_attach / telegram_send_sticker)
+```text
+~/.pi/agent/tmp/telegram/<chat_id>/<thread_id>/<msg_id>-<filename>
 ```
 
-The agent is told about the bridge via a `before_agent_start` hook that injects a system-prompt suffix — but only for Telegram-originated turns, so plain pi-CLI sessions stay clean.
+Filenames are sanitized to `[A-Za-z0-9._-]`, reduced to a basename, capped at 80 characters, and verified to stay inside the temp root.
+
+A v1 to v2 migration runs automatically on first load. It preserves `botToken`, `owner`, and `pendingPairCode`, then drops old allowlist, group, session, and dead limit fields. Existing v2 configs missing new fields are filled from defaults.
+
+## Runtime Flow
+
+```text
+Telegram message
+  -> AccessControl (private chat + owner or pairing)
+  -> MessageQueue (single global FIFO)
+  -> MediaIngest (download to ~/.pi/agent/tmp/telegram/...)
+  -> StickerCache (lookup or insert static stickers)
+  -> pi.sendUserMessage(text or text + images)
+  -> pi message/tool events
+  -> Streamer (typing, working header, throttled edits, final flush)
+  -> queued attachments/stickers
+```
+
+The extension injects a Telegram-specific system-prompt suffix only when processing a Telegram-originated turn. Plain pi-CLI prompts do not get Telegram tool instructions.
 
 ## Limitations
 
-- **Cloud Bot API:** inbound files capped at 20 MB (`getFile`), outbound capped at 50 MB (`sendDocument`). Larger files are refused with an explicit error.
-- **Outbound paths:** restricted to `process.cwd()` and `~/.pi/agent/tmp/`. Save artifacts there before calling `telegram_attach`.
-- **`/reset` from Telegram is a no-op** in V1: pi-CLI owns the conversation history.
-- **Reactions:** Telegram accepts only emojis from a fixed palette (👍 👎 ❤️ 🔥 🥰 👏 😁 🤔 🤯 😱 😢 🎉 🤩 💯 🤣 ⚡ 🤨 😐 💋 😈 😴 😭 🤓 👀 🙈 😇 😨 🤝 🫡 …). Anything else returns a 400; the tool surfaces this to the agent so it can pick a different one.
-- **Video and Lottie stickers:** emoji-only — not downloaded, not passed to the agent.
-- **Group / multi-user support:** intentionally not present. If you want it, fork.
+- **Personal-use only:** one bot, one owner, one local `pi` session.
+- **No group support:** groups, supergroups, and channels are silently dropped.
+- **Long polling only:** no webhook mode.
+- **No built-in transcription:** voice/audio/video files are saved locally and described in the prompt; the agent must inspect or transcribe them with its normal tools.
+- **Cloud Bot API file limits:** inbound files above `maxIncomingFileMb` are skipped; outbound files above `maxOutgoingFileMb` are refused before upload.
+- **Telegram-specific media limits still apply:** for example, photos have stricter limits than documents.
+- **Outbound path sandbox:** files must be under `process.cwd()` or `~/.pi/agent/tmp/`.
+- **Video and Lottie stickers:** emoji-only hints; they are not downloaded or passed as image content.
+- **Reactions:** Telegram accepts only its supported reaction emoji palette. Unsupported emoji produce a Telegram API error surfaced to the agent.
 
-## Roadmap
+## Development
 
-- Standalone daemon mode (no `pi`-CLI required) — for production deployments.
-- Webhook mode (today: long-poll only).
-- Inline keyboards for interactive tools.
-- Voice transcription (today: voice files are saved to disk; the agent reads/transcribes them itself if needed).
-- Group support behind a flag.
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+`npm run prepublishOnly` runs the release gate: typecheck, lint, tests, and build.
+
+For manual bot testing, see `scripts/e2e-manual.md`.
+
+## Release Checklist
+
+1. Update `CHANGELOG.md` and `package.json` version.
+2. Run `npm run prepublishOnly`.
+3. Inspect the packed artifact:
+
+   ```bash
+   npm pack --dry-run
+   ```
+
+4. Publish when the artifact contains only `dist`, `README.md`, `LICENSE`, `CHANGELOG.md`, and package metadata.
 
 ## License
 

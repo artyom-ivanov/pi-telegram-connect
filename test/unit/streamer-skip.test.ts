@@ -48,7 +48,7 @@ describe("Streamer [[skip]] handling", () => {
   it("text that begins with [[ski but continues differently → does NOT suppress", async () => {
     streamer.beginTurn();
     streamer.appendDelta("[[ski");
-    streamer.appendDelta("pper]]"); // not skip, the text continues
+    streamer.appendDelta("pper]]");
     await streamer.flush();
     await streamer.finalize();
     expect(mockClient.calls.length).toBeGreaterThan(0);

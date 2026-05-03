@@ -39,23 +39,22 @@ describe("Streamer throttle", () => {
     expect(String(last!.args.text)).toContain("hello world final");
   });
 
-  it("tool start before any text deltas → renders 'Thinking…' header with tool name", async () => {
+  it("tool start before any text deltas → renders 'Working…' header with tool name", async () => {
     const client = new MockTelegramClient();
     const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
-    // No appendDelta — agent calls a tool before saying anything (the "thinking" phase).
     s.toolStart("bash", '{"command":"ls -F"}');
     await vi.advanceTimersByTimeAsync(50);
     expect(client.calls.length).toBeGreaterThan(0);
     const lastText = String(client.calls[client.calls.length - 1]!.args.text);
-    expect(lastText).toContain("Thinking");
+    expect(lastText).toContain("Working");
     expect(lastText).toContain("bash");
     expect(lastText).toContain("⚙️");
     await s.flush();
     await s.finalize();
   });
 
-  it("once text streaming starts, the 'Thinking…' header is replaced by body text", async () => {
+  it("once text streaming starts, the 'Working…' header is replaced by body text", async () => {
     const client = new MockTelegramClient();
     const s = new Streamer({ client, chatId: 1, threadId: 0, throttleMs: 3000 });
     s.beginTurn();
@@ -69,9 +68,8 @@ describe("Streamer throttle", () => {
       (c) => c.method === "sendMessage" || c.method === "editMessageText",
     );
     const lastText = String(writes[writes.length - 1]!.args.text);
-    // showToolFooter defaults to false → the final text contains the body but NOT the tool history.
     expect(lastText).toContain("Here is the result");
-    expect(lastText).not.toContain("Thinking");
+    expect(lastText).not.toContain("Working");
     expect(lastText).not.toContain("bash");
   });
 
