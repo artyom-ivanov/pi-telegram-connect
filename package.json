@@ -1,9 +1,9 @@
 {
-  "name": "@artyom-ivanov/pi-telegram-connect",
+  "name": "@artyomspace/pi-telegram-connect",
   "version": "0.1.0",
   "description": "Telegram bridge for the Pi coding agent: pair once, then chat with your local pi-CLI agent from your phone.",
   "license": "MIT",
-  "author": "artyom-ivanov",
+  "author": "artyomspace",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -32,7 +32,7 @@ npm run build
 pi install /absolute/path/to/pi-telegram-connect
 ```
 
-`pi` discovers extensions through its own settings (`~/.pi/agent/settings.json#packages`), not via npm globals. Use `pi install <path>` to register a local checkout, or `pi install npm:@artyom-ivanov/pi-telegram-connect` once the package is published.
+`pi` discovers extensions through its own settings (`~/.pi/agent/settings.json#packages`), not via npm globals. Use `pi install <path>` to register a local checkout, or `pi install npm:@artyomspace/pi-telegram-connect` once the package is published.
 
 ## Quick Start
 

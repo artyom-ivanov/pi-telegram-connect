@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to `@artyom-ivanov/pi-telegram-connect`.
+All notable changes to `@artyomspace/pi-telegram-connect`.
 
 ## [0.1.0] — first release
 
